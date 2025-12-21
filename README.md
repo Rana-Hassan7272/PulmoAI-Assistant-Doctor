@@ -670,27 +670,66 @@ Production-grade error handling:
 
 ## 🐳 Docker Deployment
 
-### Option 1: CI/CD Pipeline (Recommended - No Local Builds)
+### Option 1: Use Pre-Built Images (Fastest - No Build Required)
 
-**Best for**: Saving local disk space, automated builds
+**Best for**: Quick deployment, testing, production use
 
-1. **Set up GitHub Actions** (see `CI_CD_SETUP.md`):
+**Pre-built Docker Hub Images:**
+- `mhassanshahbaz/doctor-assistant-frontend:latest` (React + Nginx)
+- `mhassanshahbaz/doctor-assistant-backend:latest` (FastAPI + Python)
+
+#### Quick Start (5 minutes)
+```bash
+# Pull and run backend
+docker run -d \
+  --name doctor-backend \
+  -p 8000:8000 \
+  -e OPENAI_API_KEY=your_openai_key \
+  -e GROQ_API_KEY=your_groq_key \
+  mhassanshahbaz/doctor-assistant-backend:latest
+
+# Pull and run frontend
+docker run -d \
+  --name doctor-frontend \
+  -p 80:80 \
+  mhassanshahbaz/doctor-assistant-frontend:latest
+
+# Access: http://localhost
+```
+
+#### Production Deployment
+```bash
+# Create .env file
+cat > .env << 'EOF'
+DOCKER_HUB_USERNAME=mhassanshahbaz
+OPENAI_API_KEY=your_openai_key
+GROQ_API_KEY=your_groq_key
+EOF
+
+# Pull pre-built images and deploy
+docker-compose -f docker-compose.prod.yml pull
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+### Option 2: CI/CD Pipeline (Automated Builds)
+
+**Best for**: Development workflow, custom modifications
+
+1. **Set up GitHub Actions** (see `DEPLOYMENT_GUIDE.md`):
    - Configure Docker Hub secrets in GitHub
    - Push code to trigger automatic builds
    - Images built on GitHub, pushed to Docker Hub
 
-2. **Deploy on server**:
+2. **Deploy updates**:
 ```bash
-# Pull pre-built images
+# Pull latest images and restart
 docker-compose -f docker-compose.prod.yml pull
 docker-compose -f docker-compose.prod.yml up -d
 ```
 
 **Workflow**: `Code → GitHub → GitHub Actions → Docker Hub → Your Server`
 
-See `CI_CD_SETUP.md` for complete setup instructions.
-
-### Option 2: Local Build
+### Option 3: Local Build
 
 **Best for**: Development, testing changes
 
@@ -707,7 +746,7 @@ docker-compose up --build
 # Backend: http://localhost:8000
 ```
 
-### Option 3: Cloud Deployment
+### Option 4: Cloud Deployment
 
 **Railway/Render/Fly.io**:
 - Connect GitHub repository
@@ -718,7 +757,7 @@ docker-compose up --build
 - Use pre-built images from Docker Hub
 - Deploy using ECS/Cloud Run/Container Apps
 
-See `DOCKER_SETUP.md` for detailed instructions.
+See `DEPLOYMENT_GUIDE.md` for detailed instructions and more deployment options.
 
 ---
 
