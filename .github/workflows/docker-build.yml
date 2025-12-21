@@ -61,9 +61,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          
-          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Debug - List frontend files
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Frontend directory contents:"
+          ls -la frontend/ || echo "Frontend directory not found"
+          echo "Looking for Dockerfile:"
+          ls -la frontend/Dockerfile || echo "Dockerfile not found in frontend"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
