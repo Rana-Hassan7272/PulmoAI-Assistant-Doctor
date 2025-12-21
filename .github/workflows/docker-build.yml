@@ -1,16 +1,7 @@
-name: Build and Push Docker Images
+name: Build and Push Docker Images (Simple Fix)
 
 on:
   push:
-    branches:
-      - main
-      - master
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'docker-compose.yml'
-      - '.github/workflows/docker-build.yml'
-  pull_request:
     branches:
       - main
       - master
@@ -19,7 +10,6 @@ on:
 env:
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
   build-backend:
@@ -27,20 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
+      - name: Checkout main repo
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Debug - List backend files
+        
+      - name: Checkout backend submodule
         run: |
-          echo "Current directory:"
-          pwd
-          echo "Backend directory contents:"
-          ls -la backend/ || echo "Backend directory not found"
-          echo "Looking for Dockerfile:"
-          ls -la backend/Dockerfile || echo "Dockerfile not found in backend"
+          git submodule init
+          git submodule update --recursive
+          
+      - name: Debug backend
+        run: |
+          echo "Listing backend directory:"
+          ls -la backend/ || echo "No backend directory"
+          echo "Checking for backend Dockerfile:"
+          ls -la backend/Dockerfile || echo "No Dockerfile in backend"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,17 +41,16 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+      # Use alternate Dockerfile from cicd directory if submodule fails
       - name: Build and push backend image
         uses: docker/build-push-action@v5
         with:
           context: ./backend
-          file: Dockerfile
+          file: ./cicd/docker/backend.Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:latest
             ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:buildcache,mode=max
 
   build-frontend:
     name: Build Frontend Docker Image
@@ -71,14 +60,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug - List frontend files
+      - name: Debug frontend
         run: |
-          echo "Current directory:"
-          pwd
-          echo "Frontend directory contents:"
-          ls -la frontend/ || echo "Frontend directory not found"
-          echo "Looking for Dockerfile:"
-          ls -la frontend/Dockerfile || echo "Dockerfile not found in frontend"
+          echo "Listing frontend directory:"
+          ls -la frontend/ || echo "No frontend directory"
+          echo "Checking for frontend Dockerfile:"
+          ls -la frontend/Dockerfile || echo "No Dockerfile in frontend"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -89,19 +76,32 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Build and push frontend image
+      - name: Build and push frontend image (try main Dockerfile)
         uses: docker/build-push-action@v5
+        continue-on-error: true
+        id: build_main
         with:
           context: ./frontend
-          file: Dockerfile
+          file: ./frontend/Dockerfile
           push: true
           build-args: |
             VITE_API_BASE_URL=http://localhost:8000
           tags: |
             ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:latest
             ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:buildcache,mode=max
+
+      - name: Build and push frontend image (fallback to cicd Dockerfile)
+        if: steps.build_main.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./cicd/docker/frontend.Dockerfile
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=http://localhost:8000
+          tags: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:latest
+            ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:${{ github.sha }}
 
   notify:
     name: Build Status Notification
@@ -118,5 +118,7 @@ jobs:
             echo "Frontend: ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-frontend:latest"
           else
             echo "❌ Build failed!"
+            echo "Backend result: ${{ needs.build-backend.result }}"
+            echo "Frontend result: ${{ needs.build-frontend.result }}"
             exit 1
           fi
