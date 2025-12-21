@@ -1,0 +1,3 @@
+[submodule "backend"]
+    path = backend
+    url = https://github.com/Rana-Hassan7272/PulmoAI-Assistant_backend.git
