@@ -41,12 +41,62 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      # Use alternate Dockerfile from cicd directory if submodule fails
-      - name: Build and push backend image
+      - name: Build and push backend image (try submodule Dockerfile)
         uses: docker/build-push-action@v5
+        continue-on-error: true
+        id: build_backend_main
         with:
           context: ./backend
-          file: ./cicd/docker/backend.Dockerfile
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:latest
+            ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:${{ github.sha }}
+
+      - name: Build and push backend image (fallback - create Dockerfile)
+        if: steps.build_backend_main.outcome == 'failure'
+        run: |
+          # Create a working Dockerfile for backend
+          cat > backend_temp.Dockerfile << 'EOF'
+          FROM python:3.11-slim
+          
+          WORKDIR /app
+          
+          # Install system dependencies
+          RUN apt-get update && apt-get install -y \
+              gcc g++ libpq-dev tesseract-ocr libtesseract-dev poppler-utils \
+              && rm -rf /var/lib/apt/lists/*
+          
+          # Copy and install Python dependencies
+          COPY backend/requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          
+          # Copy backend application
+          COPY backend/ .
+          
+          # Create directories
+          RUN mkdir -p reports data/rag_index
+          
+          # Set environment
+          ENV PYTHONUNBUFFERED=1
+          ENV PYTHONDONTWRITEBYTECODE=1
+          
+          EXPOSE 8000
+          
+          # Health check
+          HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+              CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+          
+          # Run application
+          CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          EOF
+
+      - name: Build and push backend image (using temp Dockerfile)
+        if: steps.build_backend_main.outcome == 'failure'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend_temp.Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_HUB_USERNAME }}/doctor-assistant-backend:latest
