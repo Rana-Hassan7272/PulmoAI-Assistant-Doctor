@@ -1,0 +1,38 @@
+================================================================================
+RAILWAY ONE-TIME SETUP (5 MINUTES)
+================================================================================
+
+After this setup, EVERY PUSH TO GITHUB WILL AUTO-DEPLOY!
+
+STEP 1: BACKEND SERVICE
+------------------------
+Railway Dashboard → Backend Service → Settings → Source
+- Build Method: Change to "Docker Image"
+- Image: mhassanshahbaz/doctor-assistant-backend:latest
+- Save
+
+STEP 2: FRONTEND SERVICE
+------------------------
+Railway Dashboard → Frontend Service → Settings → Source
+- Build Method: Change to "Docker Image"  
+- Image: mhassanshahbaz/doctor-assistant-frontend:latest
+- Save
+
+STEP 3: ENVIRONMENT VARIABLES
+------------------------------
+Backend Service → Variables:
+  OPENAI_API_KEY=your-key (or GROQ_API_KEY)
+  JWT_SECRET_KEY=your-secret-key
+  CORS_ORIGINS=https://your-frontend-url.railway.app
+
+Frontend Service → Variables:
+  VITE_API_BASE_URL=https://your-backend-url.railway.app
+
+STEP 4: LINK DATABASE
+----------------------
+Backend Service → Settings → Connect → PostgreSQL
+(Railway auto-provides DATABASE_URL)
+
+================================================================================
+DONE! Now push to GitHub and Railway auto-deploys!
+================================================================================

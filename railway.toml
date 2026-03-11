@@ -1,0 +1,16 @@
+# Railway Configuration
+# This file tells Railway how to deploy your services
+
+[build]
+# Use pre-built Docker images from Docker Hub
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+
+# Alternative: If you want Railway to use pre-built images,
+# you need to configure this in Railway Dashboard:
+# Settings → Source → Docker Image → mhassanshahbaz/doctor-assistant-backend:latest
+
+[deploy]
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
