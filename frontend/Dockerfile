@@ -6,8 +6,12 @@ WORKDIR /app
 
 # Build argument for API URL (Railway will provide this via environment variable)
 # Default to localhost for local builds, Railway will override with actual backend URL
+# Railway automatically passes environment variables as build args
 ARG VITE_API_BASE_URL=http://localhost:8000
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
+# Print the API URL being used (for debugging)
+RUN echo "Building with VITE_API_BASE_URL=$VITE_API_BASE_URL"
 
 # Copy package files
 COPY package*.json ./
@@ -30,7 +34,7 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Expose port (Railway will route to port 80 automatically)
+# Expose port (Railway will route to port 80, nginx listens on 80)
 EXPOSE 80
 
 # Health check
