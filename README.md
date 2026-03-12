@@ -12,6 +12,7 @@ A comprehensive, production-ready medical diagnostic assistant that combines **m
 
 ## 📋 Table of Contents
 
+- [Live Deployment](#-live-deployment)
 - [Overview](#-overview)
 - [Key Features](#-key-features)
 - [System Architecture](#-system-architecture)
@@ -25,6 +26,21 @@ A comprehensive, production-ready medical diagnostic assistant that combines **m
 - [Project Structure](#-project-structure)
 - [Innovation & Uniqueness](#-innovation--uniqueness)
 - [Real-World Applications](#-real-world-applications)
+
+---
+
+## 🌐 Live Deployment
+
+**The application is live and accessible at:**
+
+- **Frontend (Web Application)**: [https://ai-pulmonology-doctor-production.up.railway.app/](https://ai-pulmonology-doctor-production.up.railway.app/)
+- **Backend API**: [https://pulmoai-assistantbackend-production.up.railway.app](https://pulmoai-assistantbackend-production.up.railway.app)
+- **API Documentation**: [https://pulmoai-assistantbackend-production.up.railway.app/docs](https://pulmoai-assistantbackend-production.up.railway.app/docs)
+
+**Deployment Platform**: Railway  
+**Status**: ✅ Production Ready
+
+You can start using the application immediately by visiting the frontend URL above. Register a new account or login to begin a diagnostic session.
 
 ---
 
@@ -859,9 +875,36 @@ docker-compose up --build
 # Backend: http://localhost:8000
 ```
 
-### Option 4: Cloud Deployment
+### Option 4: Cloud Deployment (Railway)
 
-**Railway/Render/Fly.io**:
+**This project is currently deployed on Railway:**
+
+#### Deployment Details
+
+- **Frontend**: Deployed as a Docker container with Nginx serving React build
+- **Backend**: Deployed as a Docker container with FastAPI
+- **Database**: PostgreSQL (Railway managed)
+- **Auto-Deploy**: Enabled via GitHub integration
+
+#### Railway Configuration
+
+**Frontend Service:**
+- Root Directory: `frontend`
+- Build Method: Docker
+- Environment Variables:
+  - `VITE_API_BASE_URL`: Backend API URL
+
+**Backend Service:**
+- Root Directory: `backend`
+- Build Method: Docker
+- Environment Variables:
+  - `CORS_ORIGINS`: Frontend URL
+  - `DATABASE_URL`: PostgreSQL connection string
+  - `OPENAI_API_KEY`: OpenAI API key
+  - `GROQ_API_KEY`: Groq API key
+  - `JWT_SECRET_KEY`: JWT secret for authentication
+
+**Other Platforms (Railway/Render/Fly.io)**:
 - Connect GitHub repository
 - Set environment variables
 - Auto-deploy on push
@@ -880,8 +923,10 @@ See `DEPLOYMENT_GUIDE.md` for detailed instructions and more deployment options.
 
 All functionality is accessible through **one FastAPI service**:
 
+**Production API Base URL**: `https://pulmoai-assistantbackend-production.up.railway.app`
+
 ```
-https://your-api-domain.com/
+https://pulmoai-assistantbackend-production.up.railway.app/
 ├── /diagnostic/*     - Main workflow
 ├── /visits/*         - History & reports
 ├── /patients/*        - Patient management
@@ -894,7 +939,9 @@ https://your-api-domain.com/
 
 ### API Documentation
 
-Interactive Swagger UI: `https://your-api-domain.com/docs`
+**Interactive Swagger UI**: [https://pulmoai-assistantbackend-production.up.railway.app/docs](https://pulmoai-assistantbackend-production.up.railway.app/docs)
+
+**Health Check**: [https://pulmoai-assistantbackend-production.up.railway.app/health](https://pulmoai-assistantbackend-production.up.railway.app/health)
 
 ### Authentication
 
@@ -922,7 +969,7 @@ Authorization: Bearer YOUR_JWT_TOKEN
 ```python
 import requests
 
-BASE_URL = "https://your-api-domain.com"
+BASE_URL = "https://pulmoai-assistantbackend-production.up.railway.app"
 TOKEN = "your_jwt_token"
 
 headers = {"Authorization": f"Bearer {TOKEN}"}
