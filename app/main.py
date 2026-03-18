@@ -146,6 +146,23 @@ def startup():
     try:
         init_db()
         logger.info("Application started successfully")
+
+        # Warm up the X-ray model in the background so the first user request
+        # doesn't time out on Railway/UI limits.
+        def _warmup_xray_model():
+            try:
+                from .ml_models.xray.preprocessor import get_predictor
+
+                get_predictor()
+                logger.info("X-ray model warm-up completed")
+            except Exception as e:
+                # Don't fail startup if warm-up fails; later requests will return
+                # a clear prediction error.
+                logger.warning(f"X-ray model warm-up failed: {e}")
+
+        import threading
+
+        threading.Thread(target=_warmup_xray_model, daemon=True).start()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise

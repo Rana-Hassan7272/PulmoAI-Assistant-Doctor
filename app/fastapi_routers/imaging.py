@@ -3,11 +3,12 @@ from sqlalchemy.orm import Session
 import shutil
 import io
 import os
+import asyncio
 from PIL import Image
 from ..core.database import get_db
 from ..db_models.imaging import Imaging
 from ..schemas.imaging import ImagingResponse, XRayAnalysisResponse, XRayPredictionResult, XRayPredictionProbabilities
-from ..ml_models.xray.preprocessor import predict_xray, predict_xray_proba
+from ..ml_models.xray.preprocessor import predict_xray_all
 
 router = APIRouter(prefix="/imaging", tags=["Imaging"])
 
@@ -50,8 +51,16 @@ async def analyze_xray(file: UploadFile = File(...)):
         
         # Make prediction
         try:
-            pred_result = predict_xray(image)
-            prob_result = predict_xray_proba(image)
+            # Offload CPU-bound inference to a thread so we don't block the
+            # FastAPI event loop (prevents other chats from freezing).
+            # Fail fast instead of letting the whole request hang.
+            timeout_sec = float(os.getenv("XRAY_INFERENCE_TIMEOUT_SEC", "25"))
+            xray_all = await asyncio.wait_for(
+                asyncio.to_thread(predict_xray_all, image),
+                timeout=timeout_sec,
+            )
+            pred_result = xray_all["prediction"]
+            prob_result = xray_all["probabilities"]
             
             return XRayAnalysisResponse(
                 prediction=XRayPredictionResult(
@@ -62,11 +71,13 @@ async def analyze_xray(file: UploadFile = File(...)):
                 probabilities=XRayPredictionProbabilities(probabilities=prob_result),
                 message="X-ray analysis complete"
             )
-        except Exception as e:
+        except asyncio.TimeoutError:
             raise HTTPException(
-                status_code=500,
-                detail=f"Prediction failed: {str(e)}"
+                status_code=504,
+                detail="X-ray analysis timed out. Please try again or upload a smaller/less compressed image.",
             )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
     
     except HTTPException:
         raise

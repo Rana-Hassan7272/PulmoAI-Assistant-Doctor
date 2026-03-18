@@ -3,6 +3,8 @@ FastAPI router for diagnostic workflow (LangGraph integration).
 """
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from typing import Optional
+import asyncio
+import os
 from ..schemas.diagnostic import DiagnosticMessage, DiagnosticResponse
 from ..agents.graph import create_diagnostic_graph
 from ..agents.state import AgentState
@@ -343,11 +345,24 @@ async def chat_with_agent(
         # If X-ray image was uploaded, process it immediately and add result to conversation
         if xray_image_data:
             try:
-                from ..ml_models.xray.preprocessor import predict_xray, predict_xray_proba
+                # Use a single forward pass that returns both prediction + probabilities.
+                # (Also, run it in a thread so it can't block other requests.)
+                from ..ml_models.xray.preprocessor import predict_xray_all
                 
                 try:
-                    prediction = predict_xray(xray_image_data)
-                    probabilities = predict_xray_proba(xray_image_data)
+                    # Fail fast instead of letting the whole request hang.
+                    timeout_sec = float(os.getenv("XRAY_INFERENCE_TIMEOUT_SEC", "25"))
+                    xray_all = await asyncio.wait_for(
+                        asyncio.to_thread(predict_xray_all, xray_image_data),
+                        timeout=timeout_sec,
+                    )
+                    prediction = xray_all["prediction"]
+                    probabilities = xray_all["probabilities"]
+                except asyncio.TimeoutError:
+                    raise HTTPException(
+                        status_code=504,
+                        detail="X-ray analysis timed out. Please try again or upload a smaller/less compressed image.",
+                    )
                 except Exception as model_error:
                     print(f"Error in X-ray model prediction: {model_error}")
                     raise HTTPException(

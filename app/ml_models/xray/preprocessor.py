@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Union, Dict, Optional, Tuple
 from PIL import Image
 import numpy as np
+import threading
 
 
 class XRayPneumoniaPredictor:
@@ -217,6 +218,7 @@ class XRayPneumoniaPredictor:
 
 # Global instance (lazy-loaded)
 _predictor_instance: Optional[XRayPneumoniaPredictor] = None
+_predictor_lock = threading.Lock()
 
 
 def get_predictor() -> XRayPneumoniaPredictor:
@@ -227,10 +229,14 @@ def get_predictor() -> XRayPneumoniaPredictor:
         XRayPneumoniaPredictor instance
     """
     global _predictor_instance
-    
+
+    # Thread-safe lazy init: prevents multiple concurrent requests from
+    # triggering duplicated model loads.
     if _predictor_instance is None:
-        _predictor_instance = XRayPneumoniaPredictor()
-        _predictor_instance.load_model()
+        with _predictor_lock:
+            if _predictor_instance is None:
+                _predictor_instance = XRayPneumoniaPredictor()
+                _predictor_instance.load_model()
     
     return _predictor_instance
 
@@ -268,6 +274,53 @@ def predict_xray(image: Union[str, Path, Image.Image, np.ndarray]) -> Dict[str, 
     
     log_ml_inference("xray", duration, input_size)
     return result
+
+
+def predict_xray_all(
+    image: Union[str, Path, Image.Image, np.ndarray],
+) -> Dict[str, Dict[str, Union[int, str, float]]]:
+    """
+    Predict both:
+      - class result (class_id, class_name, confidence)
+      - probabilities for all classes
+
+    This avoids running inference twice (prediction + proba) which can
+    push request time over Railway/UI timeouts.
+    """
+    import time
+
+    from ...core.performance import log_ml_inference
+
+    start_time = time.time()
+    predictor = get_predictor()
+
+    # One forward pass: get probabilities for all classes.
+    probabilities = predictor.predict(image, return_proba=True)
+
+    # Determine predicted class from probabilities.
+    class_name_to_id = {v: k for k, v in predictor.CLASS_LABELS.items()}
+    predicted_class_name = max(probabilities, key=probabilities.get)
+    class_id = int(class_name_to_id[predicted_class_name])
+    confidence = float(probabilities[predicted_class_name])
+
+    duration = time.time() - start_time
+
+    input_size = None
+    if isinstance(image, Image.Image):
+        input_size = {"width": image.width, "height": image.height}
+    elif isinstance(image, np.ndarray):
+        input_size = {"shape": image.shape}
+
+    log_ml_inference("xray", duration, input_size)
+
+    return {
+        "prediction": {
+            "class_id": class_id,
+            "class_name": predicted_class_name,
+            "confidence": confidence,
+        },
+        "probabilities": probabilities,
+    }
 
 
 def predict_xray_proba(image: Union[str, Path, Image.Image, np.ndarray]) -> Dict[str, float]:
