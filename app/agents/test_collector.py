@@ -109,6 +109,26 @@ def test_collector_agent(state: AgentState) -> AgentState:
             state["message"] = "I've opened the **CBC Form** for you. Please enter your blood count values and click submit."
             return state
 
+        # Generic request like "form" / "show me the form":
+        # open whichever recommended test is currently pending next.
+        missing_tests = state.get("missing_tests", [])
+        pending_tests = [
+            t for t in recommended
+            if (t == "spirometry" and not state.get("spirometry_available") and "spirometry" not in missing_tests)
+            or (t == "cbc" and not state.get("cbc_available") and "cbc" not in missing_tests)
+        ]
+
+        if pending_tests:
+            next_form_test = pending_tests[0]
+            if next_form_test == "spirometry":
+                state["show_spirometry_form_modal"] = True
+                state["message"] = "I've opened the **Spirometry Form** for you. Please enter the FEV1 and FVC values from your report and click submit."
+                return state
+            if next_form_test == "cbc":
+                state["show_cbc_form_modal"] = True
+                state["message"] = "I've opened the **CBC Form** for you. Please enter your blood count values and click submit."
+                return state
+
     # 5. DETERMINE NEXT ACTION
     missing_tests = state.get("missing_tests", [])
     xray_avail = state.get("xray_available", False)
