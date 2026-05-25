@@ -96,26 +96,6 @@ const FinalReport: React.FC<FinalReportProps> = ({ state, onDownload }) => {
         {/* Diagnosis & Treatment */}
         <TreatmentPlan state={state} />
 
-        {/* Calculated Dosages (Detailed) */}
-        {state.calculated_dosages && Object.keys(state.calculated_dosages).length > 0 && (
-          <div className="card mb-6 bg-yellow-50 border-l-4 border-l-yellow-400">
-            <h2 className="text-xl font-bold text-gray-900 mb-3">Medication Dosages</h2>
-            <div className="grid md:grid-cols-2 gap-4">
-              {Object.entries(state.calculated_dosages).map(([medication, dosage]: [string, any]) => (
-                <div key={medication} className="bg-white p-3 rounded border border-yellow-200">
-                  <h3 className="font-semibold text-gray-900 border-b pb-1 mb-2 capitalize">{medication}</h3>
-                  <div className="space-y-1 text-sm">
-                    {dosage.dose && <p><span className="text-gray-600">Dose:</span> <span className="font-medium">{dosage.dose}</span></p>}
-                    {dosage.frequency && <p><span className="text-gray-600">Frequency:</span> <span className="font-medium">{dosage.frequency}</span></p>}
-                    {dosage.duration && <p><span className="text-gray-600">Duration:</span> <span className="font-medium">{dosage.duration}</span></p>}
-                    {dosage.notes && <p className="mt-2 text-xs text-gray-500 italic">{dosage.notes}</p>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Progress Summary (if returning patient) */}
         {state.progress_summary && (
           <div className="card border-l-4 border-l-blue-500 mb-6">

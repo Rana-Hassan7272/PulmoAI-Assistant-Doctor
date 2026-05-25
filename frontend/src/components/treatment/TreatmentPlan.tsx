@@ -32,7 +32,13 @@ const TreatmentPlan: React.FC<TreatmentPlanProps> = ({ state }) => {
         <div className="mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-2">Diagnosis</h3>
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-gray-800">{state.diagnosis}</p>
+            <p className="text-gray-800">
+              {typeof state.diagnosis === 'string'
+                ? state.diagnosis
+                : typeof state.diagnosis === 'object' && state.diagnosis !== null
+                  ? (state.diagnosis as any).primary || (state.diagnosis as any).primary_diagnosis || JSON.stringify(state.diagnosis)
+                  : String(state.diagnosis)}
+            </p>
           </div>
         </div>
       )}
@@ -120,11 +126,19 @@ const TreatmentPlan: React.FC<TreatmentPlanProps> = ({ state }) => {
       {state.followup_instruction && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4">
           <h3 className="text-lg font-semibold text-gray-900 mb-2">Follow-up Instructions</h3>
-          <p className="text-gray-800">
-            {typeof state.followup_instruction === 'string' 
-              ? state.followup_instruction 
-              : JSON.stringify(state.followup_instruction)}
-          </p>
+          {Array.isArray(state.followup_instruction) ? (
+            <ul className="list-disc list-inside space-y-1 text-gray-800">
+              {state.followup_instruction.map((item: string, i: number) => (
+                <li key={i}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-gray-800">
+              {typeof state.followup_instruction === 'string'
+                ? state.followup_instruction
+                : JSON.stringify(state.followup_instruction)}
+            </p>
+          )}
         </div>
       )}
     </div>

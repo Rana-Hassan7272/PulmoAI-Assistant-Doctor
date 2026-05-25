@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { diagnosticService } from '../services/diagnostic'
 import { Message, DiagnosticResponse, DiagnosticState } from '../services/types'
+import { useWebSocket, WSStreamEnd, WSStreamStart } from '../services/useWebSocket'
 import ChatWindow from '../components/chat/ChatWindow'
 import PatientDataCard from '../components/patient/PatientDataCard'
 import PatientConfirmation from '../components/patient/PatientConfirmation'
@@ -14,6 +15,20 @@ import ProgressIndicator from '../components/workflow/ProgressIndicator'
 import SpirometryForm, { SpirometryData } from '../components/tests/SpirometryForm'
 import CBCForm, { CBCData } from '../components/tests/CBCForm'
 import toast from 'react-hot-toast'
+
+/** Convert a File to a base64 data string (without the data:... prefix). */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      // Strip the "data:image/...;base64," prefix
+      resolve(result.split(',')[1] || result)
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
 
 const Diagnostic = () => {
   const { isAuthenticated, user } = useAuth()
@@ -31,123 +46,33 @@ const Diagnostic = () => {
   const [showCBCForm, setShowCBCForm] = useState(false)
   const [showReport, setShowReport] = useState(false)
 
-  // Redirect if not authenticated
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    }
-  }, [isAuthenticated, navigate])
+  // Ref to accumulate streamed tokens into the current assistant message
+  const streamBufferRef = useRef('')
+  const streamingRef = useRef(false)
+  const sessionStartedRef = useRef(false)
 
-  // Start diagnostic session on mount
-  useEffect(() => {
-    if (isAuthenticated) {
-      startSession()
-    }
-  }, [isAuthenticated])
-
-  const startSession = async () => {
-    setSessionLoading(true)
-    try {
-      const response: DiagnosticResponse = await diagnosticService.start()
-      
-      if (response.visit_id) {
-        setVisitId(response.visit_id)
-      }
-
+  // ---- Process a full response (shared by WS stream_end and REST fallback) ----
+  const processResponse = useCallback(
+    (response: { message?: string; current_step?: string | null; emergency_flag?: boolean; emergency_reason?: string | null; state?: Record<string, any> }) => {
       if (response.current_step) {
         setCurrentStep(response.current_step)
       }
 
       if (response.emergency_flag) {
         setEmergencyFlag(true)
-        toast.error('Emergency detected! Please seek immediate medical attention.')
+        toast.error(response.emergency_reason || 'Emergency detected! Please seek immediate medical attention.')
       }
 
-      // Update diagnostic state
       if (response.state) {
-        setDiagnosticState(response.state)
-      }
+        setDiagnosticState(response.state as DiagnosticState)
 
-      // Add initial AI message
-      if (response.message) {
-        setMessages([
-          {
-            role: 'assistant',
-            content: response.message,
-            timestamp: new Date(),
-          },
-        ])
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to start diagnostic session')
-      console.error('Error starting session:', error)
-    } finally {
-      setSessionLoading(false)
-    }
-  }
-
-  const handleSend = async (message: string, file?: File) => {
-    if (!visitId) {
-      toast.error('Session not initialized. Please refresh the page.')
-      return
-    }
-
-    // Add user message immediately
-    const userMessage: Message = {
-      role: 'user',
-      content: message,
-      timestamp: new Date(),
-    }
-    setMessages((prev) => [...prev, userMessage])
-
-    // Add thinking indicator
-    const thinkingMessage: Message = {
-      role: 'assistant',
-      content: 'Processing...',
-      timestamp: new Date(),
-      isThinking: true
-    }
-    setMessages((prev) => [...prev, thinkingMessage])
-
-    setLoading(true)
-
-    try {
-      const response: DiagnosticResponse = await diagnosticService.chat(
-        message,
-        visitId,
-        file
-      )
-
-      // Update state
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-
-      if (response.emergency_flag) {
-        setEmergencyFlag(true)
-        toast.error(
-          response.emergency_reason ||
-            'Emergency detected! Please seek immediate medical attention.'
-        )
-      }
-
-      // Update diagnostic state
-      if (response.state) {
-        setDiagnosticState(response.state)
-        
-        // Check if we need to show confirmation modal
         const needsConfirmation =
           response.current_step === 'patient_intake_awaiting_confirmation' ||
           (response.state.patient_data_confirmed === false &&
             response.state.patient_name &&
             !showConfirmation)
-        
-        if (needsConfirmation) {
-          setShowConfirmation(true)
-        }
+        if (needsConfirmation) setShowConfirmation(true)
 
-        // Check if we need to show treatment approval
-        // Also check for show_treatment_approval flag from backend
         const needsTreatmentApproval =
           (response.current_step === 'treatment_approval' ||
             response.current_step === 'rag_specialist_awaiting_approval' ||
@@ -156,21 +81,14 @@ const Diagnostic = () => {
           response.state.treatment_plan.length > 0 &&
           !response.state.treatment_approved &&
           !showTreatmentApproval
+        if (needsTreatmentApproval) setShowTreatmentApproval(true)
 
-        if (needsTreatmentApproval) {
-          setShowTreatmentApproval(true)
-        }
-
-        // Check if we need to show forms as modals (sequential)
-        // New backend uses show_spirometry_form_modal and show_cbc_form_modal flags
-        // Priority: Show forms when backend explicitly requests them
         if (response.state.show_spirometry_form_modal && !showSpirometryForm && !showCBCForm) {
           setShowSpirometryForm(true)
         } else if (response.state.show_cbc_form_modal && !showCBCForm && !showSpirometryForm) {
           setShowCBCForm(true)
         }
-        
-        // Also check for direct form requests in message
+
         const messageLower = response.message?.toLowerCase() || ''
         if (messageLower.includes('spirometry form') && !showSpirometryForm && !showCBCForm) {
           setShowSpirometryForm(true)
@@ -178,49 +96,36 @@ const Diagnostic = () => {
           setShowCBCForm(true)
         }
 
-        // Check if session is complete (after treatment approval and report generation)
-        // New workflow: treatment_approval → supervisor → dosage_calculator → supervisor → report_generator → supervisor → history_saver → supervisor → followup_agent → END
-        // Check for final_report in state or if we're at the end of the workflow
-        const isFinalStep = response.current_step === 'end' || 
-            response.current_step === 'followup_agent' ||
-            response.current_step === 'history_saver' ||
-            response.current_step === 'report_generator'
-        
-        const hasFinalReport = response.state?.final_report || 
-            (response.state?.treatment_approved && 
-             response.state?.calculated_dosages &&
-             (isFinalStep || response.current_step === 'dosage_calculator'))
-        
+        const isFinalStep = response.current_step === 'end' ||
+          response.current_step === 'followup_agent' ||
+          response.current_step === 'history_saver' ||
+          response.current_step === 'report_generator'
+        const hasFinalReport = response.state?.final_report ||
+          (response.state?.treatment_approved &&
+            response.state?.calculated_dosages &&
+            (isFinalStep || response.current_step === 'dosage_calculator'))
         if (isFinalStep || hasFinalReport) {
-          // Report is ready - close chat and show report
           setShowReport(true)
           setShowConfirmation(false)
           setShowTreatmentApproval(false)
           setShowSpirometryForm(false)
           setShowCBCForm(false)
         }
-      }
 
-      // Remove thinking message
-      setMessages((prev) => prev.filter(msg => !msg.isThinking))
+        if (response.state.patient_data_confirmed) setShowConfirmation(false)
 
-      // Add AI response
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
+        if (response.state.show_spirometry_form_modal && !showSpirometryForm && !showCBCForm) {
+          setShowSpirometryForm(true)
+        } else if (response.state.show_cbc_form_modal && !showCBCForm && !showSpirometryForm) {
+          setShowCBCForm(true)
         }
-        setMessages((prev) => [...prev, aiMessage])
       }
 
-      // Check if session ended or report is ready
-      const isSessionComplete = response.current_step === 'end' || 
-          response.current_step === 'followup_agent' ||
-          response.current_step === 'history_saver' ||
-          (response.state?.final_report && response.current_step !== 'treatment_approval') ||
-          response.emergency_flag
-      
+      const isSessionComplete = response.current_step === 'end' ||
+        response.current_step === 'followup_agent' ||
+        response.current_step === 'history_saver' ||
+        (response.state?.final_report && response.current_step !== 'treatment_approval') ||
+        response.emergency_flag
       if (isSessionComplete) {
         if (response.current_step === 'followup_agent' || response.current_step === 'end' || response.state?.final_report) {
           toast.success('Diagnostic session completed. Report is ready.')
@@ -233,66 +138,197 @@ const Diagnostic = () => {
           setShowReport(true)
         }
       }
-      
-      // After form submission, check if next form should be shown
-      if (response.state) {
-        // Check for next form in sequence
-        if (response.state.show_spirometry_form_modal && !showSpirometryForm && !showCBCForm) {
-          setShowSpirometryForm(true)
-        } else if (response.state.show_cbc_form_modal && !showCBCForm && !showSpirometryForm) {
-          setShowCBCForm(true)
-        }
+    },
+    [showConfirmation, showTreatmentApproval, showSpirometryForm, showCBCForm],
+  )
 
-        // If patient data has been confirmed in this response (even if the user typed "yes" in chat
-        // instead of using the confirmation modal buttons), ensure the confirmation modal is closed.
-        if (response.state.patient_data_confirmed) {
-          setShowConfirmation(false)
+  // ---- WebSocket callbacks ----
+  const handleWsToken = useCallback((token: string) => {
+    streamBufferRef.current += token
+    const accumulated = streamBufferRef.current
+    setMessages((prev) => {
+      const updated = [...prev]
+      // Replace the last assistant (streaming) message content
+      for (let i = updated.length - 1; i >= 0; i--) {
+        if (updated[i].role === 'assistant' && updated[i].isThinking) {
+          updated[i] = { ...updated[i], content: accumulated }
+          return updated
         }
       }
+      return prev
+    })
+  }, [])
+
+  const handleWsStreamStart = useCallback((_data: WSStreamStart) => {
+    streamBufferRef.current = ''
+    streamingRef.current = true
+    // Replace the "Processing..." thinking bubble with an empty streaming bubble
+    setMessages((prev) => {
+      const updated = prev.filter((m) => !m.isThinking)
+      return [
+        ...updated,
+        { role: 'assistant' as const, content: '', timestamp: new Date(), isThinking: true },
+      ]
+    })
+  }, [])
+
+  const handleWsStreamEnd = useCallback(
+    (data: WSStreamEnd) => {
+      streamingRef.current = false
+      // Replace the streaming bubble with the final message
+      setMessages((prev) => {
+        const updated = prev.filter((m) => !m.isThinking)
+        return [
+          ...updated,
+          { role: 'assistant' as const, content: data.message, timestamp: new Date() },
+        ]
+      })
+      if (data.visit_id) setVisitId(data.visit_id)
+      processResponse(data)
+      setLoading(false)
+    },
+    [processResponse],
+  )
+
+  const handleWsError = useCallback((msg: string) => {
+    toast.error(msg)
+    setLoading(false)
+    setMessages((prev) => prev.filter((m) => !m.isThinking))
+  }, [])
+
+  const { connect: wsConnect, sendChat: wsSendChat, status: wsStatus } =
+    useWebSocket({
+      onToken: handleWsToken,
+      onStreamStart: handleWsStreamStart,
+      onStreamEnd: handleWsStreamEnd,
+      onError: handleWsError,
+    })
+
+  // ---- Connect WebSocket when authenticated ----
+  useEffect(() => {
+    if (isAuthenticated) {
+      wsConnect()
+    }
+  }, [isAuthenticated, wsConnect])
+
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (!isAuthenticated) {
+      navigate('/login')
+    }
+  }, [isAuthenticated, navigate])
+
+  // Start diagnostic session on mount (REST — always needed for initial state)
+  useEffect(() => {
+    if (isAuthenticated && !sessionStartedRef.current) {
+      sessionStartedRef.current = true
+      startSession()
+    }
+  }, [isAuthenticated])
+
+  const startSession = async () => {
+    setSessionLoading(true)
+    try {
+      const response: DiagnosticResponse = await diagnosticService.start()
+
+      if (response.visit_id) setVisitId(response.visit_id)
+      if (response.current_step) setCurrentStep(response.current_step)
+      if (response.emergency_flag) {
+        setEmergencyFlag(true)
+        toast.error('Emergency detected! Please seek immediate medical attention.')
+      }
+      if (response.state) setDiagnosticState(response.state)
+      if (response.message) {
+        setMessages([{ role: 'assistant', content: response.message, timestamp: new Date() }])
+      }
     } catch (error: any) {
-      // Remove thinking message on error
-      setMessages((prev) => prev.filter(msg => !msg.isThinking))
-      
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to send message. Please try again.'
-      
-      // Check if it's a rate limit error
-      if (errorMessage.toLowerCase().includes('rate limit') || 
-          errorMessage.toLowerCase().includes('429') ||
-          errorMessage.toLowerCase().includes('quota') ||
-          errorMessage.toLowerCase().includes('processing')) {
-        // Show thinking message instead of error
-        const thinkingMessage: Message = {
-          role: 'assistant',
-          content: 'The system is processing your request. Please wait a moment...',
-          timestamp: new Date(),
-          isThinking: true
+      toast.error(error.response?.data?.detail || 'Failed to start diagnostic session')
+      console.error('Error starting session:', error)
+    } finally {
+      setSessionLoading(false)
+    }
+  }
+
+  // ---- Send message: prefer WebSocket, fall back to REST ----
+  const handleSend = async (message: string, file?: File) => {
+    if (!visitId) {
+      toast.error('Session not initialized. Please refresh the page.')
+      return
+    }
+
+    // Add user message immediately
+    const userMessage: Message = { role: 'user', content: message, timestamp: new Date() }
+    setMessages((prev) => [...prev, userMessage])
+
+    // Add thinking indicator
+    setMessages((prev) => [
+      ...prev,
+      { role: 'assistant', content: 'Processing...', timestamp: new Date(), isThinking: true },
+    ])
+    setLoading(true)
+
+    // ---- Try WebSocket first ----
+    if (wsStatus === 'connected') {
+      try {
+        let xrayB64: string | undefined
+        if (file) {
+          xrayB64 = await fileToBase64(file)
         }
-        setMessages((prev) => [...prev, thinkingMessage])
-        toast('Rate limit reached. The system is processing your request. Please wait...', { icon: '⏳' })
-        
-        // Retry after a delay
+        const sent = wsSendChat(message, visitId, xrayB64)
+        if (sent) return // WS callbacks will handle the rest
+      } catch {
+        // Fall through to REST
+      }
+    }
+
+    // ---- REST fallback ----
+    try {
+      const response: DiagnosticResponse = await diagnosticService.chat(message, visitId, file)
+
+      // Remove thinking message
+      setMessages((prev) => prev.filter((msg) => !msg.isThinking))
+
+      // Add AI response
+      if (response.message) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: response.message, timestamp: new Date() },
+        ])
+      }
+
+      if (response.visit_id) setVisitId(response.visit_id)
+      processResponse(response)
+    } catch (error: any) {
+      setMessages((prev) => prev.filter((msg) => !msg.isThinking))
+
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to send message. Please try again.'
+
+      if (
+        errorMessage.toLowerCase().includes('rate limit') ||
+        errorMessage.toLowerCase().includes('429') ||
+        errorMessage.toLowerCase().includes('quota') ||
+        errorMessage.toLowerCase().includes('processing')
+      ) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: 'The system is processing your request. Please wait a moment...', timestamp: new Date(), isThinking: true },
+        ])
+        toast('Rate limit reached. Please wait...', { icon: '⏳' })
+
         setTimeout(async () => {
           try {
-            setMessages((prev) => prev.filter(msg => !msg.isThinking))
+            setMessages((prev) => prev.filter((msg) => !msg.isThinking))
             const retryResponse = await diagnosticService.chat(message, visitId, file)
-            
-            // Process retry response same as normal response
-            if (retryResponse.current_step) {
-              setCurrentStep(retryResponse.current_step)
-            }
-            if (retryResponse.state) {
-              setDiagnosticState(retryResponse.state)
-            }
+            if (retryResponse.current_step) setCurrentStep(retryResponse.current_step)
+            if (retryResponse.state) setDiagnosticState(retryResponse.state)
             if (retryResponse.message) {
-              const aiMessage: Message = {
-                role: 'assistant',
-                content: retryResponse.message,
-                timestamp: new Date(),
-              }
-              setMessages((prev) => [...prev, aiMessage])
+              setMessages((prev) => [
+                ...prev,
+                { role: 'assistant', content: retryResponse.message, timestamp: new Date() },
+              ])
             }
-          } catch (retryError: any) {
-            setMessages((prev) => prev.filter(msg => !msg.isThinking))
+          } catch {
+            setMessages((prev) => prev.filter((msg) => !msg.isThinking))
             toast.error('Still processing. Please try again in a moment.')
           } finally {
             setLoading(false)
@@ -300,10 +336,9 @@ const Diagnostic = () => {
         }, 3000)
         return
       }
-      
+
       toast.error(errorMessage)
       console.error('Error sending message:', error)
-      // Remove user message on error
       setMessages((prev) => prev.slice(0, -1))
     } finally {
       setLoading(false)
@@ -322,295 +357,46 @@ const Diagnostic = () => {
   }
 
   const handleConfirm = async () => {
-    if (!visitId) return
-    
-    // Close confirmation modal and show thinking state in chat
     setShowConfirmation(false)
-
-    // Add user confirmation message to chat
-    const userMessage: Message = {
-      role: 'user',
-      content: 'Yes, that is correct',
-      timestamp: new Date(),
-    }
-    setMessages((prev) => [...prev, userMessage])
-
-    // Add thinking indicator
-    const thinkingMessage: Message = {
-      role: 'assistant',
-      content: 'Processing...',
-      timestamp: new Date(),
-      isThinking: true,
-    }
-    setMessages((prev) => [...prev, thinkingMessage])
-
-    setLoading(true)
-
-    try {
-      const response = await diagnosticService.chat('Yes, that is correct', visitId)
-      
-      // Remove thinking message
-      setMessages((prev) => prev.filter((msg) => !msg.isThinking))
-
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-        // After confirmation, never show confirmation modal again for this session
-        if (response.state.patient_data_confirmed) {
-          setShowConfirmation(false)
-        }
-      }
-      
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to confirm. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend('Yes, that is correct')
   }
 
   const handleReject = async (corrections: string) => {
-    if (!visitId) return
-    
     setShowConfirmation(false)
-    setLoading(true)
-    
-    try {
-      const message = corrections || 'No, that is not correct. ' + corrections
-      const response = await diagnosticService.chat(message, visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-      }
-      
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to submit corrections. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend(corrections || 'No, that is not correct.')
   }
 
   const handleTreatmentApprove = async () => {
-    if (!visitId) return
-    
     setShowTreatmentApproval(false)
-    setLoading(true)
-    
-    try {
-      const response = await diagnosticService.chat('approve', visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-      }
-      
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-      
-      // Check if report is ready (after approval, workflow continues: dosage_calculator → report_generator → history_saver → followup_agent)
-      // With supervisor, the workflow may take a moment to complete
-      if (response.state?.final_report || 
-          response.current_step === 'followup_agent' || 
-          response.current_step === 'end' ||
-          response.current_step === 'history_saver' ||
-          response.current_step === 'report_generator') {
-        // Report is ready
-        setShowReport(true)
-        setShowTreatmentApproval(false)
-        setShowConfirmation(false)
-        setShowSpirometryForm(false)
-        setShowCBCForm(false)
-        toast.success('Treatment plan approved. Final report generated.')
-      } else {
-        // Still processing - workflow will continue via supervisor
-        toast.success('Treatment plan approved. Generating final report...')
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to approve treatment. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend('approve')
   }
 
   const handleTreatmentReject = async (modifications: string) => {
-    if (!visitId) return
-    
     setShowTreatmentApproval(false)
-    setLoading(true)
-    
-    try {
-      const message = modifications || 'I would like to modify the treatment plan: ' + modifications
-      const response = await diagnosticService.chat(message, visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-      }
-      
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to submit modifications. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend(modifications || 'I would like to modify the treatment plan.')
   }
 
   const handleTreatmentQuestion = async (question: string) => {
-    if (!visitId) return
-    
-    setLoading(true)
-    
-    try {
-      const response = await diagnosticService.chat(question, visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-      }
-      
-      if (response.current_step) {
-        setCurrentStep(response.current_step)
-      }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to send question. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend(question)
   }
 
   const handleSpirometrySubmit = async (data: SpirometryData) => {
-    if (!visitId) return
-    
     setShowSpirometryForm(false)
-    setLoading(true)
-    
-    // Format data for backend extraction
     const message = `Spirometry test results submitted: FEV1=${data.fev1}L, FVC=${data.fvc}L, FEV1/FVC=${data.fev1_fvc}%`
-    
-    try {
-      const response = await diagnosticService.chat(message, visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-        
-        // Check if next form should be shown (CBC)
-        if (response.state.show_cbc_form_modal && !showCBCForm) {
-          setShowCBCForm(true)
-        }
-      }
-      
-      toast.success('Spirometry results submitted')
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to submit results. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend(message)
   }
 
   const handleCBCSubmit = async (data: CBCData) => {
-    if (!visitId) return
-    
     setShowCBCForm(false)
-    setLoading(true)
-    
-    // Format data for backend extraction - map to backend field names
     const fieldMapping: Record<string, string> = {
-      wbc: 'WBC',
-      rbc: 'RBC',
-      hemoglobin: 'HGB',
-      hematocrit: 'HCT',
-      platelets: 'PLT',
-      mcv: 'MCV',
-      mch: 'MCH',
-      mchc: 'MCHC',
+      wbc: 'WBC', rbc: 'RBC', hemoglobin: 'HGB', hematocrit: 'HCT',
+      platelets: 'PLT', mcv: 'MCV', mch: 'MCH', mchc: 'MCHC',
     }
-    
     const values = Object.entries(data)
       .filter(([_, value]) => value !== undefined)
       .map(([key, value]) => `${fieldMapping[key] || key}=${value}`)
       .join(', ')
-    const message = `CBC test results submitted: ${values}`
-    
-    try {
-      const response = await diagnosticService.chat(message, visitId)
-      
-      if (response.message) {
-        const aiMessage: Message = {
-          role: 'assistant',
-          content: response.message,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, aiMessage])
-      }
-      
-      if (response.state) {
-        setDiagnosticState(response.state)
-      }
-      
-      toast.success('CBC results submitted')
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || 'Failed to submit results. Please try again.')
-    } finally {
-      setLoading(false)
-    }
+    handleSend(`CBC test results submitted: ${values}`)
   }
 
   // Show final report if session is complete
@@ -723,11 +509,27 @@ const Diagnostic = () => {
               {user?.email} • Patient ID: {user?.patient_id || 'N/A'}
             </p>
           </div>
-          {visitId && (
-            <div className="text-sm text-gray-500">
-              Visit ID: <span className="font-mono">{visitId.slice(0, 8)}...</span>
+          <div className="flex items-center gap-3">
+            {/* WebSocket Status Indicator */}
+            <div className="flex items-center gap-1.5" title={`Connection: ${wsStatus}`}>
+              <div className={`w-2 h-2 rounded-full ${
+                wsStatus === 'connected' ? 'bg-green-500' :
+                wsStatus === 'connecting' || wsStatus === 'authenticating' ? 'bg-yellow-500 animate-pulse' :
+                wsStatus === 'reconnecting' ? 'bg-orange-500 animate-pulse' :
+                'bg-gray-400'
+              }`} />
+              <span className="text-xs text-gray-500">
+                {wsStatus === 'connected' ? 'Live' :
+                 wsStatus === 'connecting' || wsStatus === 'authenticating' ? 'Connecting...' :
+                 wsStatus === 'reconnecting' ? 'Reconnecting...' : 'REST'}
+              </span>
             </div>
-          )}
+            {visitId && (
+              <div className="text-sm text-gray-500">
+                Visit ID: <span className="font-mono">{visitId.slice(0, 8)}...</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Progress Indicator */}

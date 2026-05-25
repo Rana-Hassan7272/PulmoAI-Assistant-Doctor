@@ -6,7 +6,9 @@ A comprehensive, production-ready medical diagnostic assistant that combines **m
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Workflow-orange)
 ![React](https://img.shields.io/badge/React-18.2-blue)
+![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-brightgreen)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
+![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-blue)
 
 ---
 
@@ -72,9 +74,15 @@ You can start using the application immediately by visiting the frontend URL abo
 
 ### 🤖 Multi-Agent System
 - **10 Specialized Agents**: Each handling a specific aspect of the diagnostic workflow
-- **Intelligent Orchestration**: Supervisor agent ensures correct sequence
-- **State Persistence**: LangGraph checkpoints maintain workflow state
-- **Error Recovery**: Graceful handling of failures with fallbacks
+- **LLM-First Routing with Safety Nets**: Supervisor uses LLM intelligence for routing decisions, validated by deterministic safety constraints that prevent workflow violations (e.g., skipping diagnosis, premature report generation)
+- **State Persistence**: LangGraph checkpoints maintain workflow state across messages with shared graph singleton between REST and WebSocket endpoints
+- **Error Recovery**: Graceful handling of failures with automatic rule-based fallback routing
+
+### 🔄 Real-Time WebSocket Streaming
+- **Token-by-Token Streaming**: Live response generation via persistent WebSocket connection (`/diagnostic/ws`)
+- **REST Fallback**: Automatic fallback to REST API if WebSocket connection drops
+- **Connection Status Indicator**: Live (green), Reconnecting (orange), REST (gray) status in UI
+- **Protocol**: Auth → Chat messages → `stream_start` / `stream_token` / `stream_end` frame types
 
 ### 🧠 Machine Learning Integration
 - **X-ray Analysis**: ResNet-50 model for pneumonia detection
@@ -111,6 +119,7 @@ You can start using the application immediately by visiting the frontend URL abo
 │                      Frontend (React)                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
 │  │   Chat   │  │ Dashboard │  │  Forms   │  │  History │  │
+│  │  (WS)    │  │          │  │          │  │          │  │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  │
 └───────┼──────────────┼──────────────┼──────────────┼────────┘
         │              │              │              │
@@ -119,13 +128,17 @@ You can start using the application immediately by visiting the frontend URL abo
         ┌──────────────▼──────────────▼──────────────┐
         │         FastAPI Backend (Port 8000)         │
         │  ┌──────────────────────────────────────┐  │
-        │  │      API Endpoints (REST)            │  │
+        │  │  API Endpoints (REST + WebSocket)    │  │
+        │  │  • /diagnostic/ws  (real-time)       │  │
+        │  │  • /diagnostic/*   (REST fallback)   │  │
         │  └──────────────┬───────────────────────┘  │
         │                 │                          │
         │  ┌──────────────▼───────────────────────┐ │
-        │  │      LangGraph Workflow Engine         │ │
+        │  │  LangGraph Workflow Engine            │ │
+        │  │  (Shared singleton + MemorySaver)     │ │
         │  │  ┌──────────────────────────────────┐ │ │
-        │  │  │    Supervisor Agent              │ │ │
+        │  │  │  Supervisor Agent (LLM-first)    │ │ │
+        │  │  │  + Safety-net validation          │ │ │
         │  │  └──────────┬───────────────────────┘ │ │
         │  │             │                          │ │
         │  │  ┌──────────▼───────────────────────┐ │ │
@@ -212,12 +225,13 @@ You can start using the application immediately by visiting the frontend URL abo
 ### Data Flow
 
 ```
-User Input → FastAPI → LangGraph → Agent → Tools → LLM/ML → Response
-                │         │         │       │       │         │
-                │         │         │       │       │         │
-                ▼         ▼         ▼       ▼       ▼         ▼
-            State    Checkpoint  Update  Execute  Process  Return
-            Update    Save       State   Tool     Data     Result
+User Input → WebSocket/REST → LangGraph → Agent → Tools → LLM/ML → Response
+                  │                │         │       │       │         │
+                  │                │         │       │       │         │
+                  ▼                ▼         ▼       ▼       ▼         ▼
+              Shared           Checkpoint  Update  Execute  Process  Stream
+              Graph             Save       State   Tool     Data     Tokens
+              Instance
 ```
 
 ---
@@ -225,8 +239,8 @@ User Input → FastAPI → LangGraph → Agent → Tools → LLM/ML → Response
 ## 🛠️ Technology Stack
 
 ### Backend
-- **FastAPI** - Modern Python web framework
-- **LangGraph** - Multi-agent workflow orchestration
+- **FastAPI** - Modern Python web framework (REST + WebSocket)
+- **LangGraph** - Multi-agent workflow orchestration with MemorySaver checkpointing
 - **SQLAlchemy** - Database ORM
 - **Groq/OpenAI** - LLM providers
 - **PyTorch** - Deep learning (X-ray model)
@@ -240,7 +254,8 @@ User Input → FastAPI → LangGraph → Agent → Tools → LLM/ML → Response
 - **TypeScript** - Type safety
 - **Vite** - Build tool
 - **TailwindCSS** - Styling
-- **Axios** - HTTP client
+- **Axios** - HTTP client (REST fallback)
+- **Native WebSocket** - Real-time streaming with auto-reconnect
 - **React Router** - Navigation
 - **React Hot Toast** - Notifications
 
@@ -248,6 +263,7 @@ User Input → FastAPI → LangGraph → Agent → Tools → LLM/ML → Response
 - **Docker** - Containerization
 - **Nginx** - Frontend server
 - **SQLite** - Database (can be upgraded to PostgreSQL)
+- **GitHub Actions** - CI/CD pipeline (Docker build + push)
 
 ---
 
@@ -677,7 +693,7 @@ Doctor-Assistant/
 │   │   │   └── tools.py      # Shared tools
 │   │   ├── core/             # Core utilities
 │   │   ├── db_models/         # Database models
-│   │   ├── fastapi_routers/  # API endpoints
+│   │   ├── fastapi_routers/  # API endpoints (REST + WebSocket)
 │   │   ├── ml_models/         # ML model implementations
 │   │   └── main.py           # FastAPI app
 │   ├── Dockerfile
@@ -718,12 +734,12 @@ Combines three AI paradigms:
 - **ML Models** (PyTorch/XGBoost) - Medical image/data analysis
 - **RAG** (FAISS) - Evidence-based knowledge retrieval
 
-### 3. **Deterministic Workflow**
-Uses **rule-based routing** instead of pure LLM decisions:
-- Ensures critical steps aren't skipped
-- Predictable, auditable workflow
-- Better error handling
-- Production-ready reliability
+### 3. **LLM-First Routing with Safety Nets**
+Hybrid routing strategy combining LLM intelligence with deterministic safeguards:
+- **LLM decides next step** based on full workflow context (temperature=0.0 for consistency)
+- **Safety-net validation** prevents violations: can't skip RAG diagnosis, can't approve non-existent plans, can't generate report without treatment approval
+- **Rule-based fallback** kicks in if LLM fails or returns invalid responses
+- Fully auditable with structured logging of all routing decisions and overrides
 
 ### 4. **Sequential Test Collection**
 Intelligent test collection:
@@ -927,7 +943,8 @@ All functionality is accessible through **one FastAPI service**:
 
 ```
 https://pulmoai-assistantbackend-production.up.railway.app/
-├── /diagnostic/*     - Main workflow
+├── /diagnostic/ws     - WebSocket (real-time streaming)
+├── /diagnostic/*      - REST workflow (fallback)
 ├── /visits/*         - History & reports
 ├── /patients/*        - Patient management
 ├── /imaging/*        - X-ray analysis
@@ -1006,6 +1023,9 @@ See `TESTING_GUIDE.md` for complete testing instructions.
 
 ## 📈 Future Enhancements
 
+- [x] ~~Real-time WebSocket streaming~~
+- [x] ~~LLM-first supervisor with safety nets~~
+- [x] ~~Robust LLM response normalization~~
 - [ ] Multi-language support
 - [ ] Voice input/output
 - [ ] Mobile app (React Native)
@@ -1065,6 +1085,48 @@ This project demonstrates:
 
 
 
-**Version**: 1.0.0  
-**Last Updated**: 2024
+## Changelog
+
+### v1.1.0 (May 2026)
+
+**Real-Time WebSocket Streaming**
+- Added WebSocket endpoint (`/diagnostic/ws`) for token-by-token response streaming
+- Frontend `useWebSocket` hook with auto-reconnect and exponential backoff
+- Connection status indicator (Live/Reconnecting/REST) in diagnostic UI
+- REST API remains as automatic fallback
+
+**Supervisor Agent Overhaul**
+- Refactored from pure rule-based to **LLM-first routing with safety-net validation**
+- LLM suggests next agent → validated against hard constraints → rule-based fallback if invalid
+- Safety nets prevent: skipping RAG diagnosis, approving non-existent treatment plans, generating reports without approval, re-running completed steps
+- Structured logging for all routing decisions and overrides
+
+**Workflow Bug Fixes**
+- Fixed infinite loop where supervisor kept regenerating doctor notes after patient confirmation
+- Fixed shared graph instance between REST and WebSocket (was causing state loss between endpoints)
+- Fixed treatment approval agent auto-approving with no treatment plan present
+- Fixed spirometry/CBC form modals not triggering when user says test name without "form"
+- Prevented React StrictMode double-start creating orphan graph checkpoints
+
+**LLM Response Normalization**
+- Diagnosis: handles dict (`{primary: "..."}`) and list responses → clean string
+- Treatment plan: handles nested dict (`{pharmacological: [...], non_pharmacological: [...]}`) → flat list
+- Follow-up: handles list of strings → joined string or rendered as bullet list
+- Improved LLM prompt to request flat response structures
+
+**Report & UI Fixes**
+- Removed duplicate dosages section in final report
+- Patient confirmation now shows gender, duration, medical history (omits weight if not provided instead of showing "Nonekg")
+- Frontend defensively renders diagnosis/followup as objects or arrays
+
+### v1.0.0 (2024)
+- Initial release with multi-agent diagnostic workflow
+- 10 specialized agents with LangGraph orchestration
+- 3 ML models (X-ray, Spirometry, CBC)
+- RAG-powered diagnosis and treatment planning
+- React frontend with TailwindCSS
+- Docker deployment with CI/CD
+
+**Version**: 1.1.0  
+**Last Updated**: May 2026
 
