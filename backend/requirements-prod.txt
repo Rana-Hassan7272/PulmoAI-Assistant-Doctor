@@ -1,0 +1,42 @@
+# Production requirements (PyTorch installed separately in Dockerfile)
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+psycopg2-binary
+python-multipart
+pillow
+opencv-python-headless
+numpy
+pandas
+scikit-learn
+sentence-transformers
+faiss-cpu
+python-dotenv
+openai
+xgboost
+# torch and torchvision installed separately in Dockerfile (CPU-only)
+pytesseract
+pdf2image
+joblib
+imbalanced-learn
+langgraph
+langgraph-checkpoint-sqlite
+langchain
+langchain-community
+typing-extensions
+groq
+PyPDF2
+reportlab
+tf-keras
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt>=4.0.0
+email-validator
+# Testing dependencies (optional in production)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+httpx>=0.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
