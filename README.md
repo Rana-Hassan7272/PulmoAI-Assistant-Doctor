@@ -62,7 +62,7 @@ You can start using the application immediately by visiting the frontend URL abo
 ### 🎨 What Makes This Unique?
 
 - **Multi-Agent Architecture**: 10 specialized AI agents working in harmony
-- **Three ML Models**: X-ray, Spirometry, and CBC analysis integrated seamlessly
+- **Three ML Models**: X-ray (87.82%), Spirometry (98.38%), and CBC (99.83%) analysis integrated seamlessly
 - **RAG-Powered Diagnosis**: Evidence-based treatment using medical knowledge base
 - **Intelligent Workflow**: LangGraph ensures strict, reliable sequence
 - **Progress Tracking**: Compares current visit with historical data
@@ -85,9 +85,9 @@ You can start using the application immediately by visiting the frontend URL abo
 - **Protocol**: Auth → Chat messages → `stream_start` / `stream_token` / `stream_end` frame types
 
 ### 🧠 Machine Learning Integration
-- **X-ray Analysis**: ResNet-50 model for pneumonia detection
-- **Spirometry Analysis**: XGBoost ensemble for lung function patterns
-- **CBC Analysis**: Blood test disease prediction
+- **X-ray Analysis**: EfficientNet-B3 model (87.82% accuracy) for pneumonia detection
+- **Spirometry Analysis**: XGBoost ensemble (98.38% accuracy) for lung function patterns
+- **CBC Analysis**: Voting Ensemble (99.83% accuracy) for blood disease prediction (9 classes)
 - **Real-time Predictions**: Fast inference with confidence scores
 
 ### 📚 RAG System
@@ -389,14 +389,20 @@ Final Response: Complete report + progress analysis
 
 ### 1. X-ray Pneumonia Detection
 
-**Model**: ResNet-50 (PyTorch)  
+**Model**: EfficientNet-B3 + TTA (PyTorch)  
 **Input**: Chest X-ray image (224x224)  
-**Output**: 
-- Class: No disease / Bacterial pneumonia / Viral pneumonia
+**Output**:
+- Class: NORMAL / BACTERIAL / VIRAL
 - Confidence scores for each class
 - Probabilities distribution
 
 **Location**: `backend/app/ml_models/xray/`
+
+**Training Details**:
+- 2-Phase training: Warm-up (frozen backbone) → Full fine-tune
+- Class-weighted loss with label smoothing
+- Test-Time Augmentation (TTA) with 5 transforms
+- 87.82% test accuracy, 86.97% macro F1
 
 **Usage**:
 ```python
@@ -425,19 +431,26 @@ result = predict_spirometry(fev1=5.0, fvc=5.0)
 
 ### 3. CBC Blood Test Analysis
 
-**Model**: XGBoost Classifier  
-**Input**: 14 blood parameters (WBC, RBC, HGB, etc.)  
+**Model**: Voting Ensemble (Random Forest + XGBoost + Gradient Boosting)  
+**Input**: 14 blood parameters (WBC, RBC, HGB, MCV, MCH, PLT, etc.)  
 **Output**:
-- Disease prediction
+- Disease prediction (9 disease classes)
 - Confidence score
+- Class probabilities
 
 **Location**: `backend/app/ml_models/bloodcount_report/`
+
+**Training Details**:
+- Dataset: Anemia Types Classification (Kaggle) - 4,680 samples
+- Preprocessing: RobustScaler, IQR outlier capping, SMOTE balancing
+- 5-Fold Stratified Cross-Validation
+- **99.83% test accuracy**
 
 **Usage**:
 ```python
 from app.ml_models.bloodcount_report import predict_blood_disease
 result = predict_blood_disease(wbc=7.0, rbc=4.5, hgb=14.0, ...)
-# Returns: {"disease_name": "Normal", "confidence": 0.92}
+# Returns: {"disease_name": "Healthy", "confidence": 0.99}
 ```
 
 ---
@@ -445,13 +458,28 @@ result = predict_blood_disease(wbc=7.0, rbc=4.5, hgb=14.0, ...)
 ## 📊 Model Performance Metrics
 
 ### X-Ray Pneumonia Detection
-- **Accuracy**: 92.40%
-- **Precision**: 91.45% | **Recall**: 92.12% | **F1 Score**: 91.59%
-- **Per-Class Performance**:
-  - No disease: Precision 99.4%, Recall 88.8%
-  - Bacterial pneumonia: Precision 94.0%, Recall 96.9%
-  - Viral pneumonia: Precision 80.9%, Recall 90.6%
-- **Test Dataset**: 500 real X-ray images (234 normal, 266 pneumonia)
+
+![Confusion Matrix](backend/app/ml_models/xray/confusion_matrix.png)
+
+**Model**: EfficientNet-B3 + TTA (5 augmentation transforms)
+
+| Metric | Value |
+|--------|-------|
+| **Test Accuracy** | **87.82%** |
+| **Best Val Accuracy** | 77.78% |
+| **Macro F1** | 86.97% |
+
+**Per-Class Performance**:
+
+| Class | Precision | Recall | F1-Score | Support |
+|-------|-----------|--------|----------|---------|
+| **BACTERIAL** | 92.31% | 89.26% | 90.76% | 242 |
+| **NORMAL** | 97.58% | 86.32% | 91.61% | 234 |
+| **VIRAL** | 71.04% | 87.84% | 78.55% | 148 |
+
+**Test Dataset**: 624 real X-ray images (234 NORMAL, 242 BACTERIAL, 148 VIRAL)
+
+![Training Curves](backend/app/ml_models/xray/training_curves.png)
 
 ### Spirometry Analysis
 - **Overall Accuracy**: 98.38%
@@ -463,10 +491,43 @@ result = predict_blood_disease(wbc=7.0, rbc=4.5, hgb=14.0, ...)
 - **Test Dataset**: 200 real patient spirometry records
 
 ### Blood Count Disease Prediction
-- **Accuracy**: 62.00%
-- **Precision**: 52.4% | **Recall**: 77.8% | **F1 Score**: 56.0%
-- **Test Dataset**: 200 real blood test samples
-- **Note**: Model performance acceptable for initial deployment, continuous improvement in progress
+
+![Feature Importance](backend/app/ml_models/bloodcount_report/feature_importance.png)
+
+**Model**: Voting Ensemble (Random Forest + XGBoost + Gradient Boosting with Soft Voting)
+
+| Metric | Value |
+|--------|-------|
+| **Test Accuracy** | **99.83%** |
+| **Macro Avg Precision** | 99.84% |
+| **Macro Avg Recall** | 99.83% |
+| **Macro Avg F1** | 99.83% |
+
+**Per-Class Performance (9 Classes):**
+
+| Class | Precision | Recall | F1-Score |
+|-------|-----------|--------|----------|
+| **Healthy** | 98.53% | 100.00% | 99.26% |
+| **Iron deficiency anemia** | 100.00% | 100.00% | 100.00% |
+| **Leukemia** | 100.00% | 100.00% | 100.00% |
+| **Leukemia + Thrombocytopenia** | 100.00% | 100.00% | 100.00% |
+| **Macrocytic anemia** | 100.00% | 100.00% | 100.00% |
+| **Normocytic hypochromic anemia** | 100.00% | 98.51% | 99.25% |
+| **Normocytic normochromic anemia** | 100.00% | 100.00% | 100.00% |
+| **Other microcytic anemia** | 100.00% | 100.00% | 100.00% |
+| **Thrombocytopenia** | 100.00% | 100.00% | 100.00% |
+
+**Test Dataset**: 605 samples (4,680 total from Anemia Types Classification dataset)
+
+**Training Details**:
+- Preprocessing: RobustScaler, IQR outlier capping (Q1-3×IQR, Q3+3×IQR)
+- Balancing: SMOTE for class imbalance
+- Validation: 5-Fold Stratified Cross-Validation
+- CV Accuracy: 99.8% ± 0.2%
+
+![CBC Confusion Matrix](backend/app/ml_models/bloodcount_report/confusion_matrix.png)
+
+![Per-Class Accuracy](backend/app/ml_models/bloodcount_report/per_class_accuracy.png)
 
 ---
 
@@ -535,9 +596,9 @@ pytest tests/ --cov=app --cov-report=html  # With coverage
 - API endpoint: `GET /model-validation/reports` - Access validation reports programmatically
 
 **Test Datasets**:
-- X-ray: 500 images from Kaggle Chest X-Ray Pneumonia dataset
+- X-ray: 624 images from Kaggle Chest X-Ray Pneumonia dataset
 - Spirometry: 200 real patient records from medical dataset
-- Blood Count: 200 real blood test samples
+- Blood Count: 605 test samples (4,680 total from Anemia Types Classification dataset)
 
 **Run Evaluation**:
 ```bash
@@ -734,28 +795,35 @@ Combines three AI paradigms:
 - **ML Models** (PyTorch/XGBoost) - Medical image/data analysis
 - **RAG** (FAISS) - Evidence-based knowledge retrieval
 
-### 3. **LLM-First Routing with Safety Nets**
+### 3. **Structured LLM Outputs via Pydantic**
+Type-safe LLM response handling:
+- **Pydantic models** (`PatientExtraction`, `RAGTreatmentPlanOutput`, `DosageOutput`) validate and normalize all LLM JSON outputs
+- **Field validators** auto-coerce malformed responses: nested dicts→flat strings, string ages→int, "yes"→bool
+- **AgentStateValidator** provides typed state initialization with defaults — single source of truth across REST, WebSocket, and tests
+- Zero manual `isinstance()` chains — Pydantic handles all edge cases declaratively
+
+### 4. **LLM-First Routing with Safety Nets**
 Hybrid routing strategy combining LLM intelligence with deterministic safeguards:
 - **LLM decides next step** based on full workflow context (temperature=0.0 for consistency)
 - **Safety-net validation** prevents violations: can't skip RAG diagnosis, can't approve non-existent plans, can't generate report without treatment approval
 - **Rule-based fallback** kicks in if LLM fails or returns invalid responses
 - Fully auditable with structured logging of all routing decisions and overrides
 
-### 4. **Sequential Test Collection**
+### 5. **Sequential Test Collection**
 Intelligent test collection:
 - Asks for tests one by one
 - Acknowledges each submission
 - Handles skip commands intelligently
 - Waits for all tests before diagnosis
 
-### 5. **Progress Tracking**
+### 6. **Progress Tracking**
 Unique feature:
 - Compares current visit with history
 - Identifies improvements or concerns
 - Provides continuity of care
 - Helps track treatment effectiveness
 
-### 6. **Comprehensive Error Handling**
+### 7. **Comprehensive Error Handling**
 Production-grade error handling:
 - LLM retry logic with exponential backoff
 - Automatic fallback between providers
@@ -1026,6 +1094,9 @@ See `TESTING_GUIDE.md` for complete testing instructions.
 - [x] ~~Real-time WebSocket streaming~~
 - [x] ~~LLM-first supervisor with safety nets~~
 - [x] ~~Robust LLM response normalization~~
+- [x] ~~Structured LLM outputs via Pydantic models~~
+- [x] ~~Typed state with Pydantic BaseModel validation~~
+- [x] ~~End-to-end integration tests (full intake → report)~~
 - [ ] Multi-language support
 - [ ] Voice input/output
 - [ ] Mobile app (React Native)
@@ -1118,6 +1189,24 @@ This project demonstrates:
 - Removed duplicate dosages section in final report
 - Patient confirmation now shows gender, duration, medical history (omits weight if not provided instead of showing "Nonekg")
 - Frontend defensively renders diagnosis/followup as objects or arrays
+
+**Structured LLM Outputs (Pydantic)**
+- `PatientExtraction` model: validates and coerces patient data from LLM (str→int age, str→bool smoker, null handling)
+- `RAGTreatmentPlanOutput` model: normalizes diagnosis (dict→str), treatment plans (nested dict→flat list), followup (list→str)
+- `DosageOutput` model: validates dosage calculation responses with safe defaults
+- Replaced ~100 lines of manual `isinstance()` / `try/except` parsing with single `model_validate()` calls
+
+**Typed State with Pydantic Validation**
+- `AgentStateValidator` BaseModel mirrors `AgentState` TypedDict with Pydantic defaults and validation
+- Single source of truth for state initialization — REST, WebSocket, and test fixtures all use `AgentStateValidator.to_agent_state()`
+- Eliminated 3 duplicate 50-line state initialization blocks across `diagnostic.py`, `ws_diagnostic.py`, and `conftest.py`
+- LangGraph still uses TypedDict internally for compatibility; Pydantic validates at entry/exit boundaries
+
+**End-to-End Integration Tests**
+- Full diagnostic session test: intake → confirm → emergency check → doctor note → test collection → RAG diagnosis → treatment approval → report generation
+- 9 Pydantic schema unit tests covering: flat strings, nested diagnosis dicts, nested treatment plan categories, list followup, type coercion, null handling, defaults
+- Fixed pre-existing WS test bugs: mock patches targeting wrong module (`diagnostic.get_graph` → `ws_diagnostic._get_graph`), incorrect `pytest.raises(Exception)` wrappers for graceful WS close
+- **94 tests passing** (0 failures)
 
 ### v1.0.0 (2024)
 - Initial release with multi-agent diagnostic workflow
