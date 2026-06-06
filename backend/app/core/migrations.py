@@ -3,11 +3,17 @@ Database Migration System
 
 Handles database schema migrations for SQLite database.
 """
+import os
 import sqlite3
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _using_postgres() -> bool:
+    url = os.getenv("DATABASE_URL", "sqlite:///./medical.db")
+    return url.startswith("postgres://") or url.startswith("postgresql://")
 
 # Database path
 DATABASE_PATH = "medical.db"
@@ -82,6 +88,10 @@ def migrate_add_pdf_report_path():
 
 def run_migrations():
     """Run all pending migrations"""
+    if _using_postgres():
+        logger.info("PostgreSQL detected; schema managed by SQLAlchemy create_all")
+        return
+
     logger.info("Running database migrations...")
     
     migrations = [

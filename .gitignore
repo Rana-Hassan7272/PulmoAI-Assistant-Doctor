@@ -1,0 +1,21 @@
+# Python
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.env/
+.venv/
+
+# Databases
+*.db
+
+# Uploads
+uploads/
+
+# OS
+.DS_Store
+Thumbs.db
