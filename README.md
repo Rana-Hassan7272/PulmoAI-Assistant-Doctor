@@ -35,11 +35,12 @@ A comprehensive, production-ready medical diagnostic assistant that combines **m
 
 **The application is live and accessible at:**
 
-- **Frontend (Web Application)**: [https://ai-pulmonology-doctor-production.up.railway.app/](https://ai-pulmonology-doctor-production.up.railway.app/)
-- **Backend API**: [https://pulmoai-assistantbackend-production.up.railway.app](https://pulmoai-assistantbackend-production.up.railway.app)
-- **API Documentation**: [https://pulmoai-assistantbackend-production.up.railway.app/docs](https://pulmoai-assistantbackend-production.up.railway.app/docs)
+- **Frontend (Web Application)**: [https://pulmo-ai-assistant-doctor.vercel.app/](https://pulmo-ai-assistant-doctor.vercel.app/)
+- **Backend API**: [https://hassan7272-pulmoai-backend.hf.space](https://hassan7272-pulmoai-backend.hf.space)
+- **API Documentation**: [https://hassan7272-pulmoai-backend.hf.space/docs](https://hassan7272-pulmoai-backend.hf.space/docs)
+- **Health Check**: [https://hassan7272-pulmoai-backend.hf.space/health](https://hassan7272-pulmoai-backend.hf.space/health)
 
-**Deployment Platform**: Railway  
+**Deployment Stack**: Vercel (frontend) · Hugging Face Spaces (backend) · Neon (PostgreSQL)  
 **Status**: ✅ Production Ready
 
 You can start using the application immediately by visiting the frontend URL above. Register a new account or login to begin a diagnostic session.
@@ -959,45 +960,58 @@ docker-compose up --build
 # Backend: http://localhost:8000
 ```
 
-### Option 4: Cloud Deployment (Railway)
+### Option 4: Cloud Deployment (Current Production Stack)
 
-**This project is currently deployed on Railway:**
+**This project is deployed on a free-tier stack:**
 
-#### Deployment Details
+```
+┌─────────────┐     API / WebSocket     ┌──────────────────────┐
+│   Vercel    │ ──────────────────────► │  Hugging Face Space  │
+│  (React UI) │                         │  (FastAPI + PyTorch) │
+└─────────────┘                         └──────────┬───────────┘
+                                                   │ DATABASE_URL
+                                                   ▼
+                                        ┌──────────────────────┐
+                                        │       Neon           │
+                                        │    (PostgreSQL)      │
+                                        └──────────────────────┘
+```
 
-- **Frontend**: Deployed as a Docker container with Nginx serving React build
-- **Backend**: Deployed as a Docker container with FastAPI
-- **Database**: PostgreSQL (Railway managed)
-- **Auto-Deploy**: Enabled via GitHub integration
+#### Live URLs
 
-#### Railway Configuration
+| Service | Platform | URL |
+|---------|----------|-----|
+| Frontend | Vercel | [https://pulmo-ai-assistant-doctor.vercel.app/](https://pulmo-ai-assistant-doctor.vercel.app/) |
+| Backend | Hugging Face Spaces | [https://hassan7272-pulmoai-backend.hf.space](https://hassan7272-pulmoai-backend.hf.space) |
+| Database | Neon | PostgreSQL (connection string via `DATABASE_URL`) |
 
-**Frontend Service:**
+#### Vercel (Frontend)
+
 - Root Directory: `frontend`
-- Build Method: Docker
+- Framework: Vite
 - Environment Variables:
-  - `VITE_API_BASE_URL`: Backend API URL
+  - `VITE_API_BASE_URL` = `https://hassan7272-pulmoai-backend.hf.space`
+- Redeploy after changing `VITE_API_BASE_URL` (Vite bakes it in at build time)
 
-**Backend Service:**
-- Root Directory: `backend`
-- Build Method: Docker
-- Environment Variables:
-  - `CORS_ORIGINS`: Frontend URL
-  - `DATABASE_URL`: PostgreSQL connection string
-  - `OPENAI_API_KEY`: OpenAI API key
-  - `GROQ_API_KEY`: Groq API key
+#### Hugging Face Space (Backend)
+
+- Space: [hassan7272/pulmoai-backend](https://huggingface.co/spaces/hassan7272/pulmoai-backend)
+- SDK: Docker · Port: `7860` · Hardware: CPU basic (16 GB RAM)
+- Deploy files: `huggingface-space/` (Dockerfile builds from `backend/`)
+- Environment Variables / Secrets:
+  - `DATABASE_URL`: Neon PostgreSQL connection string
   - `JWT_SECRET_KEY`: JWT secret for authentication
+  - `GROQ_API_KEY`: Groq API key
+  - `GROQ_MODEL`: Groq model name (optional)
+  - `CORS_ORIGINS`: `https://pulmo-ai-assistant-doctor.vercel.app`
+  - `LLM_TEMPERATURE`: LLM temperature (optional)
 
-**Other Platforms (Railway/Render/Fly.io)**:
-- Connect GitHub repository
-- Set environment variables
-- Auto-deploy on push
+#### Neon (Database)
 
-**AWS/GCP/Azure**:
-- Use pre-built images from Docker Hub
-- Deploy using ECS/Cloud Run/Container Apps
+- PostgreSQL tables are created automatically on backend startup (`init_db()`)
+- Connection string must include `?sslmode=require`
 
-See `DEPLOYMENT_GUIDE.md` for detailed instructions and more deployment options.
+**Self-hosted / other clouds**: Use pre-built Docker Hub images or `docker-compose.prod.yml` (see Option 1 above).
 
 ---
 
@@ -1007,10 +1021,10 @@ See `DEPLOYMENT_GUIDE.md` for detailed instructions and more deployment options.
 
 All functionality is accessible through **one FastAPI service**:
 
-**Production API Base URL**: `https://pulmoai-assistantbackend-production.up.railway.app`
+**Production API Base URL**: `https://hassan7272-pulmoai-backend.hf.space`
 
 ```
-https://pulmoai-assistantbackend-production.up.railway.app/
+https://hassan7272-pulmoai-backend.hf.space/
 ├── /diagnostic/ws     - WebSocket (real-time streaming)
 ├── /diagnostic/*      - REST workflow (fallback)
 ├── /visits/*         - History & reports
@@ -1024,9 +1038,9 @@ https://pulmoai-assistantbackend-production.up.railway.app/
 
 ### API Documentation
 
-**Interactive Swagger UI**: [https://pulmoai-assistantbackend-production.up.railway.app/docs](https://pulmoai-assistantbackend-production.up.railway.app/docs)
+**Interactive Swagger UI**: [https://hassan7272-pulmoai-backend.hf.space/docs](https://hassan7272-pulmoai-backend.hf.space/docs)
 
-**Health Check**: [https://pulmoai-assistantbackend-production.up.railway.app/health](https://pulmoai-assistantbackend-production.up.railway.app/health)
+**Health Check**: [https://hassan7272-pulmoai-backend.hf.space/health](https://hassan7272-pulmoai-backend.hf.space/health)
 
 ### Authentication
 
@@ -1054,7 +1068,7 @@ Authorization: Bearer YOUR_JWT_TOKEN
 ```python
 import requests
 
-BASE_URL = "https://pulmoai-assistantbackend-production.up.railway.app"
+BASE_URL = "https://hassan7272-pulmoai-backend.hf.space"
 TOKEN = "your_jwt_token"
 
 headers = {"Authorization": f"Bearer {TOKEN}"}
