@@ -151,13 +151,16 @@ def startup():
         # doesn't time out on Railway/UI limits.
         def _warmup_xray_model():
             try:
-                from .ml_models.xray.preprocessor import get_predictor
+                from .ml_models.xray.preprocessor import ensure_xray_model_loaded, reset_predictor
 
-                get_predictor()
-                logger.info("X-ray model warm-up completed")
+                if ensure_xray_model_loaded():
+                    logger.info("X-ray model warm-up completed")
+                else:
+                    reset_predictor()
+                    logger.warning("X-ray model warm-up failed: model could not be loaded")
             except Exception as e:
-                # Don't fail startup if warm-up fails; later requests will return
-                # a clear prediction error.
+                from .ml_models.xray.preprocessor import reset_predictor
+                reset_predictor()
                 logger.warning(f"X-ray model warm-up failed: {e}")
 
         import threading
@@ -171,7 +174,14 @@ def startup():
 @app.get("/health")
 def health_check():
     """Health check endpoint for Docker/Kubernetes"""
-    return {"status": "healthy", "service": "doctor-assistant-api"}
+    from .ml_models.xray.preprocessor import ensure_xray_model_loaded
+
+    xray_ok = ensure_xray_model_loaded()
+    return {
+        "status": "healthy",
+        "service": "doctor-assistant-api",
+        "xray_model_loaded": xray_ok,
+    }
 
 
 # Performance metrics endpoint

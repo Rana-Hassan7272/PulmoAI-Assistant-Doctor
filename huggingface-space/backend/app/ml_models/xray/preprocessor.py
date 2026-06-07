@@ -8,6 +8,7 @@ This module provides functionality to:
 """
 
 import os
+import logging
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -17,6 +18,8 @@ from typing import Union, Dict, Optional, Tuple
 from PIL import Image
 import numpy as np
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 class XRayPneumoniaPredictor:
@@ -102,8 +105,21 @@ class XRayPneumoniaPredictor:
                 f"Model file not found at {self.model_path}. "
                 "Please ensure the trained model is saved in the xray folder."
             )
-        
-        print(f"Loading model from {self.model_path}...")
+
+        file_size = self.model_path.stat().st_size
+        if file_size < 1_000_000:
+            header = self.model_path.read_bytes()[:128]
+            if b"git-lfs" in header or header.startswith(b"version https://"):
+                raise FileNotFoundError(
+                    f"Model file at {self.model_path} is a Git LFS pointer ({file_size} bytes), "
+                    "not the actual weights. Run: git lfs pull && git lfs push origin main"
+                )
+            raise FileNotFoundError(
+                f"Model file at {self.model_path} is too small ({file_size} bytes). "
+                "The weights file may be missing or corrupted."
+            )
+
+        logger.info(f"Loading X-ray model from {self.model_path} ({file_size // 1_000_000}MB)...")
         
         # Build model architecture
         self.model = self._build_model()
@@ -144,7 +160,7 @@ class XRayPneumoniaPredictor:
         self.model.eval()
         
         self.is_loaded = True
-        print(f"Model loaded successfully on {self.device}!")
+        logger.info(f"X-ray model loaded successfully on {self.device}")
     
     def preprocess_image(self, image: Union[str, Path, Image.Image, np.ndarray]) -> torch.Tensor:
         """
@@ -293,13 +309,13 @@ _predictor_instance: Optional[XRayPneumoniaPredictor] = None
 _predictor_lock = threading.Lock()
 
 
+def reset_predictor() -> None:
+    global _predictor_instance
+    with _predictor_lock:
+        _predictor_instance = None
+
+
 def get_predictor() -> XRayPneumoniaPredictor:
-    """
-    Get or create the global predictor instance.
-    
-    Returns:
-        XRayPneumoniaPredictor instance
-    """
     global _predictor_instance
 
     with _predictor_lock:
@@ -311,6 +327,16 @@ def get_predictor() -> XRayPneumoniaPredictor:
         predictor.load_model()
         _predictor_instance = predictor
         return _predictor_instance
+
+
+def ensure_xray_model_loaded() -> bool:
+    try:
+        get_predictor()
+        return True
+    except Exception as exc:
+        logger.error(f"X-ray model failed to load: {exc}")
+        reset_predictor()
+        return False
 
 
 def predict_xray(image: Union[str, Path, Image.Image, np.ndarray]) -> Dict[str, Union[int, str, float]]:
@@ -333,7 +359,11 @@ def predict_xray(image: Union[str, Path, Image.Image, np.ndarray]) -> Dict[str, 
     from ...core.performance import log_ml_inference
     
     start_time = time.time()
-    predictor = get_predictor()
+    try:
+        predictor = get_predictor()
+    except Exception:
+        reset_predictor()
+        predictor = get_predictor()
     result = predictor.predict(image)
     duration = time.time() - start_time
     
@@ -364,9 +394,12 @@ def predict_xray_all(
     from ...core.performance import log_ml_inference
 
     start_time = time.time()
-    predictor = get_predictor()
+    try:
+        predictor = get_predictor()
+    except Exception:
+        reset_predictor()
+        predictor = get_predictor()
 
-    # One forward pass: get probabilities for all classes.
     probabilities = predictor.predict(image, return_proba=True)
 
     # Determine predicted class from probabilities.
