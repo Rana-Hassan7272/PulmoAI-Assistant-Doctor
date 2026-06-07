@@ -50,6 +50,9 @@ const Diagnostic = () => {
   const streamBufferRef = useRef('')
   const streamingRef = useRef(false)
   const sessionStartedRef = useRef(false)
+  const wsVisitRef = useRef<string | null>(null)
+  const wsConnectRef = useRef<(visitId?: string | null) => void>(() => {})
+  const wsDisconnectRef = useRef<() => void>(() => {})
 
   // ---- Process a full response (shared by WS stream_end and REST fallback) ----
   const processResponse = useCallback(
@@ -174,17 +177,27 @@ const Diagnostic = () => {
 
   const handleWsStreamEnd = useCallback(
     (data: WSStreamEnd) => {
+      const wasStreaming = streamingRef.current
       streamingRef.current = false
-      // Replace the streaming bubble with the final message
-      setMessages((prev) => {
-        const updated = prev.filter((m) => !m.isThinking)
-        return [
-          ...updated,
-          { role: 'assistant' as const, content: data.message, timestamp: new Date() },
-        ]
-      })
+
+      if (wasStreaming && data.message) {
+        setMessages((prev) => {
+          const updated = prev.filter((m) => !m.isThinking)
+          const last = updated[updated.length - 1]
+          if (last?.role === 'assistant' && last.content === data.message) {
+            return updated
+          }
+          return [
+            ...updated,
+            { role: 'assistant' as const, content: data.message, timestamp: new Date() },
+          ]
+        })
+      }
+
       if (data.visit_id) setVisitId(data.visit_id)
-      processResponse(data)
+      if (data.state || data.current_step) {
+        processResponse(data)
+      }
       setLoading(false)
     },
     [processResponse],
@@ -206,16 +219,22 @@ const Diagnostic = () => {
       onStreamStart: handleWsStreamStart,
       onStreamEnd: handleWsStreamEnd,
       onError: handleWsError,
+      maxReconnectAttempts: 2,
     })
 
+  wsConnectRef.current = wsConnect
+  wsDisconnectRef.current = wsDisconnect
+
   useEffect(() => {
-    if (isAuthenticated && visitId) {
-      wsConnect(visitId)
-    }
+    if (!isAuthenticated || !visitId) return
+    if (wsVisitRef.current === visitId) return
+    wsVisitRef.current = visitId
+    wsConnectRef.current(visitId)
     return () => {
-      wsDisconnect()
+      wsVisitRef.current = null
+      wsDisconnectRef.current()
     }
-  }, [isAuthenticated, visitId, wsConnect, wsDisconnect])
+  }, [isAuthenticated, visitId])
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -233,6 +252,7 @@ const Diagnostic = () => {
   }, [isAuthenticated])
 
   const startSession = async () => {
+    if (visitId) return
     setSessionLoading(true)
     try {
       const response: DiagnosticResponse = await diagnosticService.start()

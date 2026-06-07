@@ -61,6 +61,9 @@ interface UseWebSocketOptions {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const WS_ENABLED =
+  import.meta.env.VITE_ENABLE_WS === 'true' ||
+  (import.meta.env.VITE_ENABLE_WS !== 'false' && !API_BASE_URL.includes('hf.space'))
 
 // Reconnect config
 const BASE_DELAY_MS = 1000     // 1 second initial delay
@@ -137,15 +140,34 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
   }, [clearTimers])
 
   const visitIdRef = useRef<string | null>(null)
+  const connectingRef = useRef(false)
 
   /** Internal connect logic (used for both initial connect and reconnect). */
   const connectInternal = useCallback((isReconnect: boolean = false) => {
+    if (!WS_ENABLED) {
+      setStatus('disconnected')
+      return
+    }
+
     const token = localStorage.getItem('token')
     if (!token) {
       setStatus('error')
       optsRef.current.onError?.('No authentication token found. Please log in.')
       return
     }
+
+    if (
+      !isReconnect &&
+      wsRef.current &&
+      (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+    ) {
+      return
+    }
+
+    if (connectingRef.current && !isReconnect) {
+      return
+    }
+    connectingRef.current = true
 
     cleanup()
     setStatus(isReconnect ? 'reconnecting' : 'connecting')
@@ -174,8 +196,8 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
 
       switch (data.type) {
         case 'auth_ok':
+          connectingRef.current = false
           setStatus('connected')
-          // Reset reconnect counter on successful auth
           reconnectAttemptRef.current = 0
           if (isReconnect) {
             optsRef.current.onReconnect?.()
@@ -216,13 +238,13 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
     }
 
     ws.onclose = (event) => {
+      connectingRef.current = false
       if (pingRef.current) {
         clearInterval(pingRef.current)
         pingRef.current = null
       }
 
-      // Don't reconnect if intentionally closed or auth rejected (code 1008)
-      if (intentionalCloseRef.current || event.code === 1008) {
+      if (intentionalCloseRef.current || event.code === 1008 || event.code === 4001 || event.code === 4002) {
         setStatus('disconnected')
         return
       }
@@ -251,7 +273,14 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
 
   /** Public connect — resets attempt counter and starts fresh. */
   const connect = useCallback((visitId?: string | null) => {
+    if (!WS_ENABLED) {
+      setStatus('disconnected')
+      return
+    }
     if (visitId) {
+      if (visitIdRef.current === visitId && wsRef.current?.readyState === WebSocket.OPEN) {
+        return
+      }
       visitIdRef.current = visitId
     }
     reconnectAttemptRef.current = 0
