@@ -75,16 +75,27 @@ def supervisor_agent(state: AgentState) -> AgentState:
         logger.info("Supervisor: test_collector (redirect flag)")
         return state
 
+    if flags.get("pending_tests"):
+        from .intent_router import _parse_test_actions_pattern, last_user_message
+        actions = _parse_test_actions_pattern(last_user_message(state), flags["pending_tests"])
+        state["test_collection_complete"] = False
+        state["next_step"] = "test_collector"
+        if actions:
+            state["pending_test_actions"] = actions
+        logger.info(f"Supervisor: test_collector (pending={flags['pending_tests']})")
+        return state
+
+    if flags["test_collection_complete"] and not flags["treatment_plan_ready"]:
+        state["next_step"] = "rag_treatment_planner"
+        logger.info("Supervisor: rag_treatment_planner (tests complete)")
+        return state
+
     decision = route_user_intent(state, flags)
     apply_routing_to_state(state, decision)
 
     flags = _compute_workflow_flags(state)
     state["test_collection_complete"] = flags["test_collection_complete"]
     next_agent = validate_routing_decision(decision, flags, state)
-
-    if flags.get("pending_tests"):
-        state["test_collection_complete"] = False
-
     state["next_step"] = next_agent
     logger.info(
         f"Supervisor: {next_agent} | intent={decision.get('user_intent')} | {decision.get('reason')}"

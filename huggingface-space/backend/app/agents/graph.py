@@ -70,7 +70,6 @@ def create_diagnostic_graph():
     
     workflow.add_edge("doctor_note_generator", END)
     workflow.add_conditional_edges("test_collector", check_test_collection_complete, {
-        "complete": "supervisor",
         "awaiting_tests": END,
         "awaiting_rag": "rag_specialist",
     })
@@ -293,9 +292,7 @@ def check_treatment_approval(state):
 def check_test_collection_complete(state):
     if not state.get("test_collection_complete"):
         return "awaiting_tests"
-    if state.get("treatment_plan") and not state.get("force_treatment_regen"):
-        return "complete"
-    if state.get("auto_run_treatment_plan"):
+    if state.get("auto_run_treatment_plan") and not state.get("treatment_plan"):
         state["auto_run_treatment_plan"] = False
         return "awaiting_rag"
-    return "complete"
+    return "awaiting_tests"

@@ -113,12 +113,20 @@ def test_collector_agent(state: AgentState) -> AgentState:
     else:
         actions = parse_test_actions(last_message, pending)
 
-    for action in actions:
+    skips = [a for a in actions if a["type"] == "skip"]
+    forms = [a for a in actions if a["type"] != "skip"]
+    for action in skips:
+        _apply_skip(state, action["test"])
+
+    pending = _pending_tests(state, recommended)
+    if not pending:
+        ack = f"Thank you for providing the {just_collected}." if just_collected else ""
+        return _structure_final_output(state, ack=ack)
+
+    for action in forms:
         atype = action["type"]
         test = action["test"]
-        if atype == "skip":
-            _apply_skip(state, test)
-        elif atype == "show_form" and test == "spirometry" and "spirometry" in pending:
+        if atype == "show_form" and test == "spirometry" and "spirometry" in pending:
             state["show_spirometry_form_modal"] = True
             state["message"] = (
                 "I've opened the **Spirometry Form**. Enter FEV1 and FVC from your report, then submit."

@@ -68,30 +68,18 @@ def _normalize_test_name(name: str) -> Optional[str]:
 
 
 def normalize_clinical_text(text: str, kind: str = "symptoms") -> str:
-    if not text or len(text.strip()) < 8:
-        return text.strip() if text else ""
-
-    try:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Rewrite the patient's message into clear clinical English. "
-                    "Fix typos and grammar but keep the same meaning. "
-                    "Do not add new symptoms or diagnoses. "
-                    "Return JSON: {\"normalized\": \"...\"}"
-                ),
-            },
-            {"role": "user", "content": f"Type: {kind}\nText: {text}"},
-        ]
-        raw = call_groq_llm(messages, temperature=0.0, json_mode=True)
-        data = _parse_json_llm(raw)
-        normalized = str(data.get("normalized", "")).strip()
-        if normalized and len(normalized) >= 3:
-            return normalized
-    except Exception as exc:
-        logger.warning(f"Clinical text normalization failed: {exc}")
-    return text.strip()
+    if not text:
+        return ""
+    t = re.sub(r"\s+", " ", text.strip())
+    fixes = {
+        "throught": "throat", "caugh": "cough", "brething": "breathing",
+        "spiromtery": "spirometry", "alergy": "allergy", "chestpain": "chest pain",
+    }
+    lower = t.lower()
+    for wrong, right in fixes.items():
+        if wrong in lower:
+            t = re.sub(re.escape(wrong), right, t, flags=re.IGNORECASE)
+    return t
 
 
 def _is_test_command_message(message: str) -> bool:
@@ -99,8 +87,8 @@ def _is_test_command_message(message: str) -> bool:
     if not msg.strip():
         return False
     markers = (
-        "skip", "xray", "x-ray", "cbc", "spiro", "upload", "form",
-        "fev1", "fvc", "blood", "chest", "image uploaded", "submitted",
+        "skip", "xray", "x-ray", "cbc", "spiro", "cray", "upload", "form",
+        "fev1", "fvc", "blood", "chest", "image uploaded", "submitted", "only",
     )
     return any(m in msg for m in markers)
 
@@ -169,6 +157,10 @@ def parse_test_actions(user_message: str, pending: List[str]) -> List[Dict[str, 
     if not pending or not user_message.strip():
         return []
 
+    pattern_actions = _parse_test_actions_pattern(user_message, pending)
+    if pattern_actions:
+        return pattern_actions
+
     try:
         messages = [
             {
@@ -214,14 +206,52 @@ def parse_test_actions(user_message: str, pending: List[str]) -> List[Dict[str, 
 
 
 def _parse_test_actions_pattern(message: str, pending: List[str]) -> List[Dict[str, str]]:
-    msg = message.lower().replace("spiromtery", "spirometry").replace("x-ray", "xray")
+    msg = (
+        message.lower()
+        .replace("spiromtery", "spirometry")
+        .replace("x-ray", "xray")
+        .replace("x ray", "xray")
+        .replace("cray", "xray")
+    )
     actions: List[Dict[str, str]] = []
+
+    def add_action(atype: str, test: str) -> None:
+        if test not in pending:
+            return
+        for a in actions:
+            if a["test"] == test and a["type"] == atype:
+                return
+        actions.append({"type": atype, "test": test})
+
+    skip_checks = [
+        ("xray", (r"skip\s+(?:the\s+)?(?:xray|x-ray|x\s*ray|cray|chest\s*scan)",)),
+        ("cbc", (r"skip\s+(?:the\s+)?(?:cbc|blood(?:\s*test)?)",)),
+        ("spirometry", (r"skip\s+(?:the\s+)?(?:spirometry|spiro(?:metry)?)",)),
+    ]
+    for test, patterns in skip_checks:
+        for pat in patterns:
+            if re.search(pat, msg):
+                add_action("skip", test)
+
+    only_match = re.search(
+        r"only\s+(?:(?:give|want|need)\s+)?(?:the\s+)?(xray|cbc|spirometry|spiro|cray|blood)",
+        msg,
+    )
+    if only_match:
+        only_test = _normalize_test_name(only_match.group(1))
+        if only_test:
+            for t in pending:
+                if t != only_test:
+                    add_action("skip", t)
+            atype = "prompt_upload" if only_test == "xray" else "show_form"
+            add_action(atype, only_test)
+            return actions
 
     for test in ("xray", "cbc", "spirometry"):
         if test not in pending:
             continue
         mentioned = test in msg
-        if test == "xray" and ("x ray" in msg or "chest" in msg):
+        if test == "xray" and ("chest" in msg and "skip" not in msg.split("chest")[0][-10:]):
             mentioned = True
         if test == "cbc" and "blood" in msg:
             mentioned = True
@@ -229,21 +259,32 @@ def _parse_test_actions_pattern(message: str, pending: List[str]) -> List[Dict[s
             mentioned = True
         if not mentioned:
             continue
-        if "skip" in msg:
-            actions.append({"type": "skip", "test": test})
-        elif test == "xray":
-            actions.append({"type": "prompt_upload", "test": "xray"})
-        elif "form" in msg or "give" in msg or msg.strip() == test:
-            actions.append({"type": "show_form", "test": test})
+        if re.search(rf"skip\s+(?:the\s+)?{test}", msg) or (
+            test == "xray" and re.search(r"skip\s+(?:the\s+)?(?:cray|xray)", msg)
+        ):
+            add_action("skip", test)
+        elif ("form" in msg or "give" in msg) and test in msg:
+            atype = "prompt_upload" if test == "xray" else "show_form"
+            add_action(atype, test)
+        elif test == "xray" and ("upload" in msg or "attach" in msg):
+            add_action("prompt_upload", "xray")
 
     if "skip" in msg and not any(a["type"] == "skip" for a in actions) and pending:
-        actions.insert(0, {"type": "skip", "test": pending[0]})
+        add_action("skip", pending[0])
 
     return actions
 
 
 def parse_approval_intent(state: AgentState) -> Dict[str, Any]:
     last_msg = last_user_message(state)
+    lower = last_msg.lower()
+    if any(w in lower for w in ("yes", "approve", "accept", "proceed", "agreed", "looks good", "ok")):
+        return {"intent": "approve", "reason": "pattern"}
+    if any(w in lower for w in ("give", "upload", "form", "provide", "need", "want")) and any(
+        t in lower for t in ("xray", "cbc", "spiro", "blood", "chest", "cray")
+    ):
+        return {"intent": "more_tests", "reason": "pattern"}
+
     context = _conversation_snippet(state, 4)
 
     try:
@@ -271,13 +312,6 @@ def parse_approval_intent(state: AgentState) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning(f"LLM approval intent failed: {exc}")
 
-    lower = last_msg.lower()
-    if any(w in lower for w in ("yes", "approve", "accept", "proceed", "agreed", "looks good", "ok")):
-        return {"intent": "approve", "reason": "pattern fallback"}
-    if any(w in lower for w in ("give", "upload", "form", "provide", "need", "want")) and any(
-        t in lower for t in ("xray", "cbc", "spiro", "blood", "chest")
-    ):
-        return {"intent": "more_tests", "reason": "pattern fallback"}
     return {"intent": "unclear", "reason": "pattern fallback"}
 
 
@@ -318,81 +352,7 @@ def route_user_intent(state: AgentState, flags: Dict[str, Any]) -> Dict[str, Any
                 "reason": "user requested more tests during treatment review",
             }
 
-    context = _conversation_snippet(state, 6)
-
-    workflow = (
-        f"patient_confirmed={flags['patient_confirmed']}\n"
-        f"emergency_checked={flags['emergency_checked']}\n"
-        f"emergency_detected={flags['emergency_detected']}\n"
-        f"doctor_note_ready={flags['doctor_note_ready']}\n"
-        f"tests_recommended={flags['tests_recommended']}\n"
-        f"pending_tests={flags['pending_tests']}\n"
-        f"tests_complete={flags['test_collection_complete']}\n"
-        f"xray_done={flags['xray_available']}\n"
-        f"cbc_done={flags['cbc_available']}\n"
-        f"spirometry_done={flags['spirometry_available']}\n"
-        f"treatment_plan_ready={flags['treatment_plan_ready']}\n"
-        f"treatment_approved={flags['treatment_approved']}\n"
-        f"dosage_calculated={flags['dosage_calculated']}\n"
-        f"final_report_ready={flags['final_report_ready']}\n"
-        f"history_saved={flags['history_saved']}\n"
-    )
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are the master intent router for a pulmonology diagnostic chatbot.\n"
-                "Read workflow state + conversation + latest user message.\n"
-                "Understand typos, informal language, and mixed intents.\n\n"
-                "Return JSON only:\n"
-                "{\n"
-                '  "next_agent": "emergency_detector|doctor_note_generator|test_collector|'
-                'rag_treatment_planner|treatment_approval|dosage_calculator|report_generator|'
-                'history_saver|end",\n'
-                '  "user_intent": "short label",\n'
-                '  "test_actions": [{"type": "skip|show_form|prompt_upload", "test": "xray|cbc|spirometry"}],\n'
-                '  "clear_treatment_plan": false,\n'
-                '  "reason": "one sentence"\n'
-                "}\n\n"
-                "Agents:\n"
-                "- emergency_detector: first safety check only if emergency_checked=false\n"
-                "- doctor_note_generator: need clinical assessment (no doctor_note yet)\n"
-                "- test_collector: user providing/skipping tests OR pending tests remain after partial collection\n"
-                "- rag_treatment_planner: all recommended tests done/skipped, no treatment plan yet\n"
-                "- treatment_approval: treatment plan shown, user reviewing (not requesting more tests)\n"
-                "- dosage_calculator: treatment approved, need dosages\n"
-                "- report_generator: need final report\n"
-                "- history_saver: save completed visit\n"
-                "- end: wait for user input, nothing to process now\n\n"
-                "Tests available ONLY: xray (image upload), cbc (form), spirometry (form).\n"
-                "If user wants more tests during treatment approval → test_collector + clear_treatment_plan=true.\n"
-                "If user just uploaded/submitted one test and others pending → test_collector.\n"
-                "Never route to rag_treatment_planner while pending_tests is non-empty.\n"
-                "Never route to doctor_note_generator if doctor_note already exists."
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Workflow state:\n{workflow}\n\nConversation:\n{context}\n\nLatest user message:\n{last_msg}",
-        },
-    ]
-
-    try:
-        raw = call_groq_llm(messages, temperature=0.0, json_mode=True)
-        data = _parse_json_llm(raw)
-        agent = str(data.get("next_agent", "end")).lower().strip()
-        agent = agent.split()[0] if agent else "end"
-        if agent not in VALID_AGENTS:
-            raise ValueError(f"invalid agent {agent}")
-        data["next_agent"] = agent
-        data["test_actions"] = data.get("test_actions") or []
-        data["clear_treatment_plan"] = bool(data.get("clear_treatment_plan", False))
-        logger.info(f"Intent router: {agent} | {data.get('user_intent')} | {data.get('reason')}")
-        return data
-    except Exception as exc:
-        logger.warning(f"LLM intent router failed, using rule fallback: {exc}")
-        return _route_user_intent_fallback(state, flags, last_msg)
+    return _route_user_intent_fallback(state, flags, last_msg)
 
 
 def _rule_based_routing(state: AgentState, flags: Dict[str, Any]) -> str:
