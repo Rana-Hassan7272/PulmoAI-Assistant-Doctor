@@ -195,7 +195,9 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
           break
 
         case 'error':
-          optsRef.current.onError?.(data.message)
+          if (data.message && !data.message.includes('Unknown message type')) {
+            optsRef.current.onError?.(data.message)
+          }
           break
 
         case 'pong':

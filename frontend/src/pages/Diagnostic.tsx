@@ -191,12 +191,16 @@ const Diagnostic = () => {
   )
 
   const handleWsError = useCallback((msg: string) => {
+    if (msg.includes('Unknown message type') || msg.includes('WebSocket is not connected')) {
+      setLoading(false)
+      return
+    }
     toast.error(msg)
     setLoading(false)
     setMessages((prev) => prev.filter((m) => !m.isThinking))
   }, [])
 
-  const { connect: wsConnect, sendChat: wsSendChat, status: wsStatus } =
+  const { connect: wsConnect, disconnect: wsDisconnect, sendChat: wsSendChat, status: wsStatus } =
     useWebSocket({
       onToken: handleWsToken,
       onStreamStart: handleWsStreamStart,
@@ -204,12 +208,14 @@ const Diagnostic = () => {
       onError: handleWsError,
     })
 
-  // ---- Connect WebSocket when authenticated ----
   useEffect(() => {
     if (isAuthenticated) {
       wsConnect()
     }
-  }, [isAuthenticated, wsConnect])
+    return () => {
+      wsDisconnect()
+    }
+  }, [isAuthenticated, wsConnect, wsDisconnect])
 
   // Redirect if not authenticated
   useEffect(() => {
