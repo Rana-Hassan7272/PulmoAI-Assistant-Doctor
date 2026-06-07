@@ -32,6 +32,28 @@ class PatientExtraction(BaseModel):
     history: Optional[str] = None
     occupation: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_llm_payload(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            if not data:
+                return {}
+            merged: Dict[str, Any] = {}
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                for key, val in item.items():
+                    if val is None or val == "":
+                        continue
+                    if key not in merged or merged[key] in (None, ""):
+                        merged[key] = val
+                    elif key == "symptoms":
+                        merged[key] = f"{merged[key]}, {val}"
+            if merged:
+                return merged
+            return data[0] if isinstance(data[0], dict) else {}
+        return data
+
     @field_validator("age", mode="before")
     @classmethod
     def coerce_age(cls, v: Any) -> Optional[int]:
