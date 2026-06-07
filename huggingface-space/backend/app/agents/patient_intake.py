@@ -5,7 +5,7 @@ Collects initial patient information and handles returning patients by loading h
 import json
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 from .state import AgentState
 from .config import call_groq_llm
 from .tools import fetch_patient_history_tool, hydrate_agent_state_from_patient, save_patient_profile_tool
@@ -22,6 +22,73 @@ _TEST_ONLY_MESSAGES = {
     "ok give cbc", "give me xray", "give me cbc",
 }
 _SYMPTOM_BLOCKLIST = {"cbc", "xray", "x-ray", "spirometry", "spiromtery", "form", "yes", "no"}
+
+
+def _normalize_extraction_dict(data: Any) -> Dict[str, Any]:
+    if data is None:
+        return {}
+    if isinstance(data, PatientExtraction):
+        return data.model_dump()
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        if not data:
+            return {}
+        merged: Dict[str, Any] = {}
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            for key, val in item.items():
+                if val is None or val == "":
+                    continue
+                if key not in merged or merged[key] in (None, ""):
+                    merged[key] = val
+                elif key == "symptoms":
+                    merged[key] = f"{merged[key]}, {val}"
+        if merged:
+            return merged
+        if isinstance(data[0], dict):
+            return data[0]
+    return {}
+
+
+def _safe_validate_extraction(
+    data: Any,
+    conversation: List[Dict[str, str]],
+    symptoms_only: bool = False,
+) -> PatientExtraction:
+    normalized = _normalize_extraction_dict(data)
+    try:
+        return PatientExtraction.model_validate(normalized)
+    except Exception:
+        fallback = _extract_symptoms_fallback(conversation) if symptoms_only else _extract_basic_info_fallback(conversation)
+        return PatientExtraction.model_validate(_normalize_extraction_dict(fallback))
+
+
+def _last_user_message(conversation: List[Dict[str, str]]) -> str:
+    for msg in reversed(conversation):
+        if msg.get("role") == "user":
+            return msg.get("content", "")
+    return ""
+
+
+def _capture_symptoms_directly(state: AgentState, conversation: List[Dict[str, str]]) -> bool:
+    if state.get("symptoms"):
+        return False
+    last_user = _last_user_message(conversation)
+    if not last_user or len(last_user.strip()) < 15:
+        return False
+    if _is_confirmation_message(last_user) or _is_workflow_action_message(last_user):
+        return False
+    state["symptoms"] = last_user.strip()
+    duration_match = re.search(
+        r"(?:for|lasting|last)\s+(\d+\s*(?:days?|weeks?|months?|hours?)|last few days)",
+        last_user,
+        re.IGNORECASE,
+    )
+    if duration_match:
+        state["symptom_duration"] = duration_match.group(1).strip()
+    return True
 
 
 def _is_test_only_message(message: str) -> bool:
@@ -193,12 +260,14 @@ def patient_intake_agent(state: AgentState) -> AgentState:
     returning = bool(state.get("returning_patient_profile") and state.get("patient_name") and state.get("patient_age") is not None)
 
     if not state.get("patient_data_confirmed"):
-        data = _extract_patient_data(conversation, symptoms_only=returning)
-        try:
-            extracted = PatientExtraction.model_validate(data)
-        except Exception:
-            fallback = _extract_symptoms_fallback(conversation) if returning else _extract_basic_info_fallback(conversation)
-            extracted = PatientExtraction.model_validate(fallback)
+        if returning and _capture_symptoms_directly(state, conversation):
+            extracted = PatientExtraction(
+                symptoms=state.get("symptoms"),
+                duration=state.get("symptom_duration"),
+            )
+        else:
+            data = _extract_patient_data(conversation, symptoms_only=returning)
+            extracted = _safe_validate_extraction(data, conversation, symptoms_only=returning)
 
         if not returning:
             if extracted.name and not state.get("patient_name"):
@@ -246,6 +315,11 @@ def patient_intake_agent(state: AgentState) -> AgentState:
 
 def _extract_patient_data(conversation: List[Dict[str, str]], symptoms_only: bool = False) -> Dict[str, Any]:
     if symptoms_only:
+        last_user = _last_user_message(conversation)
+        if last_user and len(last_user.strip()) >= 15 and not _is_confirmation_message(last_user):
+            return _extract_symptoms_fallback(conversation)
+
+    if symptoms_only:
         system_prompt = (
             "Extract ONLY today's visit symptoms and duration from the latest user messages. "
             "Return a single JSON object (not an array) with keys: symptoms (string), duration (string). "
@@ -276,20 +350,7 @@ def _extract_patient_data(conversation: List[Dict[str, str]], symptoms_only: boo
         elif clean.startswith("```"):
             clean = clean.split("```")[1].split("```")[0].strip()
         parsed = json.loads(clean)
-        if isinstance(parsed, list):
-            if not parsed:
-                return {}
-            if isinstance(parsed[0], dict):
-                merged: Dict[str, Any] = {}
-                for item in parsed:
-                    if isinstance(item, dict):
-                        for k, v in item.items():
-                            if v is not None and k not in merged:
-                                merged[k] = v
-                            elif k == "symptoms" and v:
-                                merged[k] = f"{merged.get(k, '')}, {v}".strip(", ")
-                return merged or parsed[0]
-        return parsed if isinstance(parsed, dict) else {}
+        return _normalize_extraction_dict(parsed)
     except (LLMError, json.JSONDecodeError, LLMInvalidResponseError) as e:
         log_error_with_context(e, {"operation": "patient_data_extraction"})
         if symptoms_only:
