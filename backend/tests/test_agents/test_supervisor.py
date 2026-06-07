@@ -2,7 +2,13 @@
 Tests for Supervisor Agent.
 """
 import pytest
-from app.agents.supervisor import supervisor_agent, _fallback_routing, check_supervisor_routing
+from app.agents.supervisor import (
+    supervisor_agent,
+    _fallback_routing,
+    check_supervisor_routing,
+    _validate_llm_decision,
+    _compute_workflow_flags,
+)
 from app.agents.state import AgentState
 
 
@@ -88,6 +94,18 @@ class TestSupervisorAgent:
         result = supervisor_agent(state)
         
         assert result["next_step"] == "end"
+
+
+class TestValidateLlmDecision:
+    def test_blocks_repeat_doctor_note_during_test_collection(self, sample_agent_state):
+        state = sample_agent_state.copy()
+        state["doctor_note"] = "Clinical assessment"
+        state["tests_recommended"] = ["cbc", "xray"]
+        flags = _compute_workflow_flags(state)
+
+        result = _validate_llm_decision("doctor_note_generator", flags, state)
+
+        assert result == "test_collector"
 
 
 class TestFallbackRouting:

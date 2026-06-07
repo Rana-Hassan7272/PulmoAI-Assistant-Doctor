@@ -23,6 +23,7 @@ from jose import JWTError, jwt
 from ..agents.graph import create_diagnostic_graph
 from ..agents.schemas import AgentStateValidator
 from ..agents.state import AgentState
+from ..agents.tools import hydrate_agent_state_from_patient, merge_client_state_snapshot
 from ..core.auth import SECRET_KEY, ALGORITHM
 from ..core.database import SessionLocal
 from ..db_models.user import User
@@ -112,35 +113,36 @@ async def diagnostic_ws(websocket: WebSocket):
                     await websocket.close(code=4002)
                     return
 
-                # Build initial state via AgentStateValidator
-                visit_id = str(uuid.uuid4())
-                state = AgentStateValidator(
-                    patient_id=patient_id,
-                    visit_id=visit_id,
-                ).to_agent_state()
+                client_visit_id = msg.get("visit_id")
+                visit_id = client_visit_id or str(uuid.uuid4())
+                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
+
+                try:
+                    snapshot = graph.get_state(config)
+                    if snapshot and snapshot.values:
+                        state = snapshot.values
+                    else:
+                        state = AgentStateValidator(
+                            patient_id=patient_id,
+                            visit_id=visit_id,
+                        ).to_agent_state()
+                        hydrate_agent_state_from_patient(state)
+                except Exception:
+                    state = AgentStateValidator(
+                        patient_id=patient_id,
+                        visit_id=visit_id,
+                    ).to_agent_state()
+                    hydrate_agent_state_from_patient(state)
 
                 await _send(websocket, {"type": "auth_ok", "visit_id": visit_id})
                 logger.info(f"WS: authenticated user_id={user.id}, visit_id={visit_id}")
 
-                # Kick off the first graph step (patient intake greeting)
-                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
-                try:
-                    result = graph.invoke(state, config=config)
-                    state = result
-                    greeting = result.get("message") or "Hello! I'm your pulmonology assistant. How can I help you today?"
-                    await _send(websocket, {
-                        "type": "stream_end",
-                        "message": greeting,
-                        "current_step": result.get("current_step"),
-                        "visit_id": visit_id,
-                    })
-                except Exception as exc:
-                    logger.exception(f"WS: graph invoke error on start: {exc}")
-                    await _send_error(websocket, "Failed to start diagnostic session")
-
             # ------------------------------------------------------------------
             # CHAT message
             # ------------------------------------------------------------------
+            elif msg_type == "ping":
+                await _send(websocket, {"type": "pong"})
+
             elif msg_type == "chat":
                 if current_user is None or state is None:
                     await _send_error(websocket, "Not authenticated. Send an auth message first.")
@@ -150,10 +152,28 @@ async def diagnostic_ws(websocket: WebSocket):
                 if not user_text:
                     continue
 
-                # Append user message to conversation history
-                state["conversation_history"] = state.get("conversation_history", []) + [
-                    {"role": "user", "content": user_text}
-                ]
+                client_visit_id = msg.get("visit_id")
+                if client_visit_id and client_visit_id != visit_id:
+                    visit_id = client_visit_id
+                    config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
+                    try:
+                        snapshot = graph.get_state(config)
+                        if snapshot and snapshot.values:
+                            state = snapshot.values
+                    except Exception:
+                        pass
+
+                client_snapshot = msg.get("client_state")
+                if isinstance(client_snapshot, dict):
+                    state = merge_client_state_snapshot(state, client_snapshot)
+
+                hydrate_agent_state_from_patient(state)
+
+                history = state.get("conversation_history", [])
+                if not history or history[-1].get("content") != user_text:
+                    state["conversation_history"] = history + [
+                        {"role": "user", "content": user_text}
+                    ]
 
                 await _send(websocket, {"type": "stream_start"})
 
@@ -174,11 +194,13 @@ async def diagnostic_ws(websocket: WebSocket):
                         "message": full_message,
                         "current_step": result.get("current_step"),
                         "visit_id": visit_id,
+                        "patient_id": result.get("patient_id"),
                         "emergency_flag": result.get("emergency_flag", False),
                         "emergency_reason": result.get("emergency_reason"),
                         "patient_data_confirmed": result.get("patient_data_confirmed", False),
                         "treatment_approved": result.get("treatment_approved", False),
                         "final_report": result.get("final_report"),
+                        "state": result,
                     })
 
                     # Append assistant reply to conversation history

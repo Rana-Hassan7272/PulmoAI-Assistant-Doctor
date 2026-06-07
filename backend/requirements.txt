@@ -26,6 +26,7 @@ langchain
 langchain-community
 typing-extensions
 groq
+google-generativeai
 PyPDF2
 reportlab
 packaging

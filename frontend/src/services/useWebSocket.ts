@@ -136,6 +136,8 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
     }
   }, [clearTimers])
 
+  const visitIdRef = useRef<string | null>(null)
+
   /** Internal connect logic (used for both initial connect and reconnect). */
   const connectInternal = useCallback((isReconnect: boolean = false) => {
     const token = localStorage.getItem('token')
@@ -155,7 +157,11 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
 
     ws.onopen = () => {
       setStatus('authenticating')
-      ws.send(JSON.stringify({ token }))
+      ws.send(JSON.stringify({
+        type: 'auth',
+        token,
+        visit_id: visitIdRef.current || undefined,
+      }))
     }
 
     ws.onmessage = (event) => {
@@ -244,14 +250,22 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
   }, [cleanup, clearTimers, maxAttempts])
 
   /** Public connect — resets attempt counter and starts fresh. */
-  const connect = useCallback(() => {
+  const connect = useCallback((visitId?: string | null) => {
+    if (visitId) {
+      visitIdRef.current = visitId
+    }
     reconnectAttemptRef.current = 0
     connectInternal(false)
   }, [connectInternal])
 
   /** Send a chat message over the WebSocket. */
   const sendChat = useCallback(
-    (message: string, visitId: string, xrayBase64?: string) => {
+    (
+      message: string,
+      visitId: string,
+      xrayBase64?: string,
+      clientState?: Record<string, unknown> | null,
+    ) => {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         optsRef.current.onError?.('WebSocket is not connected.')
@@ -264,6 +278,9 @@ export function useWebSocket(opts: UseWebSocketOptions = {}) {
       }
       if (xrayBase64) {
         payload.xray_base64 = xrayBase64
+      }
+      if (clientState) {
+        payload.client_state = clientState
       }
       ws.send(JSON.stringify(payload))
       return true

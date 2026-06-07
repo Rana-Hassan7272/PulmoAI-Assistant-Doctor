@@ -4,9 +4,27 @@ This sets up the main LangGraph workflow with all agent nodes.
 """
 from typing import Literal, Optional, Dict, Any
 import json
+import os
+import sqlite3
 from langgraph.graph import StateGraph, END
 from .state import AgentState
 from langgraph.checkpoint.memory import MemorySaver
+
+_CHECKPOINTER = None
+
+
+def _get_checkpointer():
+    global _CHECKPOINTER
+    if _CHECKPOINTER is not None:
+        return _CHECKPOINTER
+    db_path = os.environ.get("CHECKPOINT_DB_PATH", "/tmp/langgraph_checkpoints.db")
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        _CHECKPOINTER = SqliteSaver(conn)
+    except Exception:
+        _CHECKPOINTER = MemorySaver()
+    return _CHECKPOINTER
 
 from .patient_intake import patient_intake_agent
 from .emergency_detector import emergency_detector_agent
@@ -59,20 +77,59 @@ def create_diagnostic_graph():
     workflow.add_edge("history_saver", "followup_agent")
     workflow.add_edge("followup_agent", END)
     
-    return workflow.compile(checkpointer=MemorySaver())
+    return workflow.compile(checkpointer=_get_checkpointer())
+
+
+def _recover_doctor_note_from_conversation(conversation: list) -> str:
+    for msg in reversed(conversation or []):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "")
+        if "clinical assessment" in content.lower():
+            parts = content.split("**Clinical Assessment:**", 1)
+            if len(parts) > 1:
+                note_part = parts[1].split("Based on this", 1)[0].strip()
+                if note_part:
+                    return note_part
+    return ""
 
 
 def doctor_note_generator_agent(state: AgentState) -> AgentState:
     from .tools import recommend_tests
+
+    if state.get("doctor_note"):
+        if not state.get("tests_recommended"):
+            state["tests_recommended"] = recommend_tests(state.get("symptoms", ""))
+        return state
+
+    recovered_note = _recover_doctor_note_from_conversation(state.get("conversation_history", []))
+    if recovered_note:
+        state["doctor_note"] = recovered_note
+        if not state.get("tests_recommended"):
+            from .patient_intake import _recover_tests_from_conversation
+            recovered_tests = _recover_tests_from_conversation(state.get("conversation_history", []))
+            state["tests_recommended"] = recovered_tests or recommend_tests(state.get("symptoms", ""))
+        return state
+
     test_results_text = format_test_results_for_llm(state)
-    
-    prompt = f"Patient: {state.get('patient_age')}yo {state.get('patient_gender')}. Symptoms: {state.get('symptoms')} for {state.get('symptom_duration')}. History: {state.get('patient_chronic_conditions')}. Test Results so far: {test_results_text}. Generate a 2-sentence clinical assessment note."
-    note = call_groq_llm([{"role": "user", "content": prompt}])
+
+    prompt = (
+        f"Patient: {state.get('patient_age')}yo {state.get('patient_gender')}. "
+        f"Symptoms: {state.get('symptoms')} for {state.get('symptom_duration')}. "
+        f"History: {state.get('patient_chronic_conditions')}. "
+        f"Test Results so far: {test_results_text}. "
+        "Generate a 2-sentence clinical assessment note."
+    )
+    note = call_groq_llm([{"role": "user", "content": prompt}], temperature=0.2)
     state["doctor_note"] = note
-    
+
     state["tests_recommended"] = recommend_tests(state.get("symptoms", ""))
     rec_text = ", ".join([t.upper() for t in state["tests_recommended"]])
-    state["message"] = f"**Clinical Assessment:**\n{note}\n\nBased on this, I recommend: **{rec_text}**. You can ask for a form or provide values manually. Which would you like to provide first?"
+    state["message"] = (
+        f"**Clinical Assessment:**\n{note}\n\n"
+        f"Based on this, I recommend: **{rec_text}**. "
+        "You can ask for a form or provide values manually. Which would you like to provide first?"
+    )
     return state
 
 

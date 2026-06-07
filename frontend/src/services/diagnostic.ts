@@ -16,11 +16,16 @@ export const diagnosticService = {
   chat: async (
     message: string,
     visitId: string,
-    xrayImage?: File
+    xrayImage?: File,
+    clientState?: Record<string, unknown> | null,
   ): Promise<DiagnosticResponse> => {
     const formData = new FormData()
     formData.append('message', message)
     formData.append('visit_id', visitId)
+
+    if (clientState) {
+      formData.append('client_state', JSON.stringify(clientState))
+    }
     
     if (xrayImage) {
       formData.append('xray_image', xrayImage)

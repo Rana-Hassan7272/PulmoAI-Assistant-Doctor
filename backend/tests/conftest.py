@@ -14,6 +14,7 @@ from typing import Generator
 os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing-only"
 os.environ["OPENAI_API_KEY"] = "test-openai-key"
 os.environ["GROQ_API_KEY"] = "test-groq-key"
+os.environ["GOOGLE_API_KEY"] = "test-google-key"
 
 from app.core.database import Base, get_db
 from app.main import app

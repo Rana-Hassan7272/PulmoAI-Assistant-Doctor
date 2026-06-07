@@ -9,6 +9,7 @@ from ..schemas.diagnostic import DiagnosticMessage, DiagnosticResponse
 from ..agents.graph import create_diagnostic_graph
 from ..agents.state import AgentState
 from ..agents.schemas import AgentStateValidator
+from ..agents.tools import hydrate_agent_state_from_patient, merge_client_state_snapshot
 from ..core.auth import get_current_user
 from ..db_models.user import User
 import uuid
@@ -61,7 +62,8 @@ def start_diagnostic(
         initial_state: AgentState = AgentStateValidator(
             patient_id=patient_id,
         ).to_agent_state()
-        
+        hydrate_agent_state_from_patient(initial_state)
+
         # Use visit_id as thread_id for LangGraph checkpointing
         visit_id = initial_state.get("visit_id")
         if not visit_id:
@@ -140,6 +142,7 @@ def start_diagnostic(
 async def chat_with_agent(
     message: str = Form(...),
     visit_id: Optional[str] = Form(None),
+    client_state: Optional[str] = Form(None),
     xray_image: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user)
 ):
@@ -284,13 +287,25 @@ async def chat_with_agent(
                 "history_saved": False
             }
         else:
-            # Update visit_id in existing state if needed
             state["visit_id"] = visit_id
-        
-        # Add user message to conversation history
+
+        client_snapshot = None
+        if client_state:
+            try:
+                import json
+                client_snapshot = json.loads(client_state)
+            except Exception:
+                client_snapshot = None
+
+        if client_snapshot:
+            state = merge_client_state_snapshot(state, client_snapshot)
+
+        hydrate_agent_state_from_patient(state)
+
         if "conversation_history" not in state:
             state["conversation_history"] = []
-        state["conversation_history"].append({"role": "user", "content": message})
+        if not state["conversation_history"] or state["conversation_history"][-1].get("content") != message:
+            state["conversation_history"].append({"role": "user", "content": message})
         
         # Debug: Log state before graph execution
         print(f"DEBUG: State before graph execution:")

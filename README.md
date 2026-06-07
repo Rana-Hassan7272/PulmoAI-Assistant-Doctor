@@ -41,6 +41,7 @@ A comprehensive, production-ready medical diagnostic assistant that combines **m
 - **Health Check**: [https://hassan7272-pulmoai-backend.hf.space/health](https://hassan7272-pulmoai-backend.hf.space/health)
 
 **Deployment Stack**: Vercel (frontend) · Hugging Face Spaces (backend) · Neon (PostgreSQL)  
+**AI**: Google Gemini (primary) · Groq (fallback)  
 **Status**: ✅ Production Ready
 
 You can start using the application immediately by visiting the frontend URL above. Register a new account or login to begin a diagnostic session.
@@ -1001,7 +1002,9 @@ docker-compose up --build
 - Environment Variables / Secrets:
   - `DATABASE_URL`: Neon PostgreSQL connection string
   - `JWT_SECRET_KEY`: JWT secret for authentication
-  - `GROQ_API_KEY`: Groq API key
+  - `GOOGLE_API_KEY`: Google Gemini API key (primary LLM)
+  - `GOOGLE_GEMINI_MODEL`: e.g. `gemini-3.1-flash-lite`
+  - `GROQ_API_KEY`: Groq API key (fallback LLM)
   - `GROQ_MODEL`: Groq model name (optional)
   - `CORS_ORIGINS`: `https://pulmo-ai-assistant-doctor.vercel.app`
   - `LLM_TEMPERATURE`: LLM temperature (optional)

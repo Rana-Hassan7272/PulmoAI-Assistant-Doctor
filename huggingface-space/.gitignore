@@ -1,14 +1,22 @@
+backend/backend/
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.ipynb
+
 backend/tests/
 backend/scripts/
 backend/model_validation_reports/
 backend/.pytest_cache/
 backend/htmlcov/
 backend/*.db
+backend/**/*.db
 backend/reports/
 backend/uploads/
-backend/data/rag_index/
-backend/data/**/*.index
-backend/data/**/*.pkl
+
+backend/data/
+backend/**/rag_index/
 
 backend/app/ml_models/**/dataset/
 backend/app/ml_models/**/*.csv
@@ -16,13 +24,17 @@ backend/app/ml_models/**/*.jpeg
 backend/app/ml_models/**/*.jpg
 backend/app/ml_models/**/*.png
 backend/app/ml_models/**/test/
-backend/app/ml_models/**/README.md
 backend/app/ml_models/**/resave_*.py
 
 backend/app/agents/rag/documents/*.pdf
 
-backend/**/*.md
-!README.md
+backend/build-and-push.sh
+backend/test_groq_connection.py
+backend/pytest.ini
+backend/run_migration.py
+backend/requirements-prod.txt
+
+backend/**/README.md
 
 backend/.env
 backend/.env.*

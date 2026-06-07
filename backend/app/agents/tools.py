@@ -47,7 +47,9 @@ def recommend_tests(symptoms: str, age: Optional[int] = None, gender: Optional[s
     recommended = list(set(recommended))
     if not recommended:
         recommended = ["spirometry"]
-        
+
+    order = ["xray", "cbc", "spirometry"]
+    recommended.sort(key=lambda test: order.index(test) if test in order else len(order))
     return recommended
 
 
@@ -516,11 +518,26 @@ def save_to_db_tool(state: AgentState, visit_summary: str) -> Dict[str, Any]:
                     name=state.get("patient_name", "Unknown"),
                     age=state.get("patient_age"),
                     gender=state.get("patient_gender"),
-                    smoker=state.get("patient_smoker", False)
+                    smoker=state.get("patient_smoker", False),
+                    chronic_conditions=state.get("patient_chronic_conditions"),
+                    occupation=state.get("patient_occupation"),
                 )
                 db.add(patient)
                 db.flush()
                 patient_id = patient.id
+            else:
+                if state.get("patient_name"):
+                    patient.name = state.get("patient_name")
+                if state.get("patient_age") is not None:
+                    patient.age = state.get("patient_age")
+                if state.get("patient_gender"):
+                    patient.gender = state.get("patient_gender")
+                if state.get("patient_smoker") is not None:
+                    patient.smoker = state.get("patient_smoker")
+                if state.get("patient_chronic_conditions"):
+                    patient.chronic_conditions = state.get("patient_chronic_conditions")
+                if state.get("patient_occupation"):
+                    patient.occupation = state.get("patient_occupation")
 
             # 2. Generate PDF Report (if final_report exists)
             pdf_path = None
@@ -632,23 +649,35 @@ def rag_treatment_planner_tool(state: AgentState) -> Dict[str, Any]:
     try:
         from .rag.rag_agent import get_rag_agent
         rag_agent = get_rag_agent()
-        rag_context = rag_agent.retrieve_context(query=rag_query, k=3)
-    except:
+        rag_context = rag_agent.retrieve_context(query=rag_query, k=5)
+    except Exception as rag_err:
+        logger.warning(f"RAG retrieval failed: {rag_err}")
         rag_context = "No specific medical guidelines retrieved."
 
     messages = [
         {
             "role": "system",
-            "content": "You are a pulmonologist. Analyze the patient and provide a diagnosis and treatment plan in JSON."
+            "content": (
+                "You are an expert pulmonologist. Use the patient data and medical guidelines "
+                "to produce an evidence-based diagnosis and treatment plan. "
+                "Return ONLY valid JSON with keys: diagnosis (string), treatment_plan (array of strings), "
+                "home_remedies (array of strings), followup_instruction (string). "
+                "Base recommendations on test results when available."
+            ),
         },
         {
             "role": "user",
-            "content": f"Patient data: {rag_query}\nGuidelines: {rag_context}\nReturn JSON with keys: diagnosis, treatment_plan, home_remedies, followup_instruction"
-        }
+            "content": (
+                f"Patient: {state.get('patient_name', 'Unknown')}, "
+                f"{state.get('patient_age', '?')}yo {state.get('patient_gender', '')}\n"
+                f"Data: {rag_query}\n\n"
+                f"Medical guidelines (RAG):\n{rag_context}"
+            ),
+        },
     ]
-    
+
     try:
-        response = call_groq_llm(messages, json_mode=True)
+        response = call_groq_llm(messages, temperature=0.2, json_mode=True)
         data = json.loads(response)
 
         plan = RAGTreatmentPlanOutput.model_validate(data)
@@ -663,6 +692,144 @@ def rag_treatment_planner_tool(state: AgentState) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"RAG treatment planner error: {e}")
         return {"status": "error", "diagnosis": "Pending", "treatment_plan": [], "home_remedies": [], "followup_instruction": ""}
+
+
+def load_patient_profile_tool(state: AgentState) -> Dict[str, Any]:
+    patient_id = state.get("patient_id")
+    if not patient_id:
+        return {"status": "no_patient"}
+
+    try:
+        from ..core.database import SessionLocal
+        from ..db_models.patient import Patient
+
+        db = SessionLocal()
+        try:
+            patient = db.query(Patient).filter(Patient.id == patient_id).first()
+            if not patient:
+                return {"status": "not_found"}
+            has_profile = bool(patient.name and patient.age is not None)
+            return {
+                "status": "success",
+                "has_profile": has_profile,
+                "name": patient.name,
+                "age": patient.age,
+                "gender": patient.gender,
+                "smoker": patient.smoker,
+                "chronic_conditions": patient.chronic_conditions,
+                "occupation": patient.occupation,
+            }
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"load_patient_profile_tool error: {e}")
+        return {"status": "error"}
+
+
+def save_patient_profile_tool(state: AgentState) -> Dict[str, Any]:
+    patient_id = state.get("patient_id")
+    if not patient_id:
+        return {"status": "no_patient"}
+
+    try:
+        from ..core.database import SessionLocal
+        from ..db_models.patient import Patient
+
+        db = SessionLocal()
+        try:
+            patient = db.query(Patient).filter(Patient.id == patient_id).first()
+            if not patient:
+                patient = Patient(
+                    name=state.get("patient_name", "Unknown"),
+                    age=state.get("patient_age"),
+                    gender=state.get("patient_gender"),
+                    smoker=state.get("patient_smoker", False),
+                    chronic_conditions=state.get("patient_chronic_conditions"),
+                    occupation=state.get("patient_occupation"),
+                )
+                db.add(patient)
+                db.flush()
+                state["patient_id"] = patient.id
+                patient_id = patient.id
+
+            if state.get("patient_name"):
+                patient.name = state.get("patient_name")
+            if state.get("patient_age") is not None:
+                patient.age = state.get("patient_age")
+            if state.get("patient_gender"):
+                patient.gender = state.get("patient_gender")
+            if state.get("patient_smoker") is not None:
+                patient.smoker = state.get("patient_smoker")
+            if state.get("patient_chronic_conditions"):
+                patient.chronic_conditions = state.get("patient_chronic_conditions")
+            if state.get("patient_occupation"):
+                patient.occupation = state.get("patient_occupation")
+
+            db.commit()
+            return {"status": "success"}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"save_patient_profile_tool error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def merge_client_state_snapshot(state: AgentState, snapshot: Optional[Dict[str, Any]]) -> AgentState:
+    if not snapshot or not isinstance(snapshot, dict):
+        return state
+
+    merge_keys = (
+        "patient_data_confirmed", "doctor_note", "tests_recommended", "symptoms",
+        "symptom_duration", "patient_name", "patient_age", "patient_gender",
+        "patient_smoker", "patient_weight", "emergency_checked", "emergency_flag",
+        "xray_available", "spirometry_available", "cbc_available", "missing_tests",
+        "test_collection_complete", "treatment_plan", "treatment_approved",
+        "current_step", "diagnosis", "final_report",
+    )
+    for key in merge_keys:
+        client_val = snapshot.get(key)
+        if client_val is None:
+            continue
+        if isinstance(client_val, (list, dict)) and not client_val:
+            continue
+        server_val = state.get(key)
+        if server_val is None or server_val is False or server_val == [] or server_val == {}:
+            state[key] = client_val
+
+    client_conv = snapshot.get("conversation_history") or []
+    server_conv = state.get("conversation_history") or []
+    if isinstance(client_conv, list) and len(client_conv) > len(server_conv):
+        state["conversation_history"] = client_conv
+
+    return state
+
+
+def hydrate_agent_state_from_patient(state: AgentState) -> AgentState:
+    if state.get("_profile_hydrated"):
+        return state
+
+    profile = load_patient_profile_tool(state)
+    if profile.get("status") == "success":
+        if profile.get("name") and not state.get("patient_name"):
+            state["patient_name"] = profile["name"]
+        if profile.get("age") is not None and state.get("patient_age") is None:
+            state["patient_age"] = profile["age"]
+        if profile.get("gender") and not state.get("patient_gender"):
+            state["patient_gender"] = profile["gender"]
+        if profile.get("smoker") is not None and state.get("patient_smoker") is None:
+            state["patient_smoker"] = profile["smoker"]
+        if profile.get("chronic_conditions") and not state.get("patient_chronic_conditions"):
+            state["patient_chronic_conditions"] = profile["chronic_conditions"]
+        if profile.get("occupation") and not state.get("patient_occupation"):
+            state["patient_occupation"] = profile["occupation"]
+        if profile.get("has_profile"):
+            state["returning_patient_profile"] = True
+
+    state["_profile_hydrated"] = True
+    return state
 
 
 def fetch_patient_history_tool(state: AgentState) -> Dict[str, Any]:

@@ -209,13 +209,13 @@ const Diagnostic = () => {
     })
 
   useEffect(() => {
-    if (isAuthenticated) {
-      wsConnect()
+    if (isAuthenticated && visitId) {
+      wsConnect(visitId)
     }
     return () => {
       wsDisconnect()
     }
-  }, [isAuthenticated, wsConnect, wsDisconnect])
+  }, [isAuthenticated, visitId, wsConnect, wsDisconnect])
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -273,6 +273,14 @@ const Diagnostic = () => {
     ])
     setLoading(true)
 
+    const conversationHistory = [
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user' as const, content: message },
+    ]
+    const stateSnapshot = diagnosticState
+      ? { ...diagnosticState, conversation_history: conversationHistory }
+      : { conversation_history: conversationHistory }
+
     // ---- Try WebSocket first ----
     if (wsStatus === 'connected') {
       try {
@@ -280,7 +288,7 @@ const Diagnostic = () => {
         if (file) {
           xrayB64 = await fileToBase64(file)
         }
-        const sent = wsSendChat(message, visitId, xrayB64)
+        const sent = wsSendChat(message, visitId, xrayB64, stateSnapshot)
         if (sent) return // WS callbacks will handle the rest
       } catch {
         // Fall through to REST
@@ -289,7 +297,7 @@ const Diagnostic = () => {
 
     // ---- REST fallback ----
     try {
-      const response: DiagnosticResponse = await diagnosticService.chat(message, visitId, file)
+      const response: DiagnosticResponse = await diagnosticService.chat(message, visitId, file, stateSnapshot)
 
       // Remove thinking message
       setMessages((prev) => prev.filter((msg) => !msg.isThinking))
@@ -324,7 +332,7 @@ const Diagnostic = () => {
         setTimeout(async () => {
           try {
             setMessages((prev) => prev.filter((msg) => !msg.isThinking))
-            const retryResponse = await diagnosticService.chat(message, visitId, file)
+            const retryResponse = await diagnosticService.chat(message, visitId, file, stateSnapshot)
             if (retryResponse.current_step) setCurrentStep(retryResponse.current_step)
             if (retryResponse.state) setDiagnosticState(retryResponse.state)
             if (retryResponse.message) {

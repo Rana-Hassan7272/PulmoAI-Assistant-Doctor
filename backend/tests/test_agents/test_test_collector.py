@@ -21,6 +21,30 @@ class TestTestCollectorAgent:
         assert result["current_step"] == "test_collector"
         assert result["message"] is not None
     
+    def test_opens_cbc_form_on_give_cbc(self, sample_agent_state):
+        state = sample_agent_state.copy()
+        state["tests_recommended"] = ["xray", "cbc", "spirometry"]
+        state["conversation_history"] = [
+            {"role": "user", "content": "ok give cbc"}
+        ]
+
+        result = collector_agent(state)
+
+        assert result["show_cbc_form_modal"] is True
+        assert "CBC Form" in result["message"]
+
+    def test_opens_spirometry_form_on_report_request(self, sample_agent_state):
+        state = sample_agent_state.copy()
+        state["tests_recommended"] = ["xray", "cbc", "spirometry"]
+        state["conversation_history"] = [
+            {"role": "user", "content": "i have spirometry test report give form"}
+        ]
+
+        result = collector_agent(state)
+
+        assert result["show_spirometry_form_modal"] is True
+        assert "Spirometry Form" in result["message"]
+
     def test_handles_skip_request(self, sample_agent_state):
         """Test handling of skip requests."""
         state = sample_agent_state.copy()

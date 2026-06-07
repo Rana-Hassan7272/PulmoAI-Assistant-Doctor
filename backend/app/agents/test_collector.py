@@ -1,50 +1,140 @@
 """
-Test Collector Agent - Sequential State Machine
-Handles X-ray, CBC, and Spirometry collection in a strict sequence.
+Test Collector Agent - handles test collection with LLM intent parsing + ML processing.
 """
 import json
-import io
 import re
+import logging
 from typing import Dict, Any, Optional, List
-from PIL import Image
 from .state import AgentState
 from .config import call_groq_llm
-
-# Import ML prediction functions
-from ..ml_models.xray.preprocessor import predict_xray, predict_xray_proba
 from ..ml_models.spirometry.featurizer import predict_spirometry, predict_spirometry_proba
-from ..ml_models.bloodcount_report.feature import predict_blood_disease, predict_blood_disease_proba
+from ..ml_models.bloodcount_report.feature import predict_blood_disease
+
+logger = logging.getLogger(__name__)
+
+
+def _pending_tests(state: AgentState, recommended: List[str]) -> List[str]:
+    missing = state.get("missing_tests", [])
+    pending = []
+    for test in recommended:
+        if test == "xray" and not state.get("xray_available") and "xray" not in missing:
+            pending.append("xray")
+        elif test == "spirometry" and not state.get("spirometry_available") and "spirometry" not in missing:
+            pending.append("spirometry")
+        elif test == "cbc" and not state.get("cbc_available") and "cbc" not in missing:
+            pending.append("cbc")
+    return pending
+
+
+def _parse_test_actions_llm(state: AgentState, user_message: str, pending: List[str]) -> List[Dict[str, str]]:
+    if not pending:
+        return []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You interpret patient messages during diagnostic test collection. "
+                f"Pending tests: {', '.join(pending)}. "
+                "Return JSON only: {\"actions\": [{\"type\": \"skip|show_form|prompt_upload\", \"test\": \"xray|cbc|spirometry\"}]}. "
+                "Examples: "
+                "'skip xray give spirometry form' -> skip xray + show_form spirometry. "
+                "'give xray' or 'xray form' -> prompt_upload xray (X-ray uses image upload, not a form). "
+                "'skip' alone -> skip the first pending test. "
+                "'give cbc form' -> show_form cbc. "
+                "Only use tests from the pending list."
+            ),
+        },
+        {"role": "user", "content": user_message},
+    ]
+
+    try:
+        raw = call_groq_llm(messages, temperature=0.0, json_mode=True)
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("```")[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+            clean = clean.split("```")[0].strip()
+        data = json.loads(clean)
+        actions = data.get("actions", [])
+        valid = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            atype = str(action.get("type", "")).lower()
+            test = str(action.get("test", "")).lower().replace("x-ray", "xray")
+            if atype in ("skip", "show_form", "prompt_upload") and test in ("xray", "cbc", "spirometry"):
+                if test in pending or atype == "skip":
+                    valid.append({"type": atype, "test": test})
+        return valid
+    except Exception as e:
+        logger.warning(f"LLM test intent parse failed: {e}")
+        return _parse_test_actions_fallback(user_message, pending)
+
+
+def _parse_test_actions_fallback(message: str, pending: List[str]) -> List[Dict[str, str]]:
+    msg = message.lower().replace("spiromtery", "spirometry").replace("x-ray", "xray")
+    actions: List[Dict[str, str]] = []
+
+    for test in ("xray", "cbc", "spirometry"):
+        if test not in msg:
+            continue
+        if "skip" in msg and test in pending:
+            actions.append({"type": "skip", "test": test})
+        elif test == "xray" and test in pending:
+            actions.append({"type": "prompt_upload", "test": "xray"})
+        elif "form" in msg or "give" in msg or msg.strip() == test:
+            if test in pending:
+                actions.append({"type": "show_form" if test != "xray" else "prompt_upload", "test": test})
+
+    if "skip" in msg and not any(a["type"] == "skip" for a in actions) and pending:
+        actions.insert(0, {"type": "skip", "test": pending[0]})
+
+    return actions
+
+
+def _apply_skip(state: AgentState, test: str) -> None:
+    missing = state.setdefault("missing_tests", [])
+    if test not in missing:
+        missing.append(test)
+
+
+def _message_for_next_test(state: AgentState, next_test: str, ack: str = "") -> str:
+    prefix = f"{ack} " if ack else ""
+    if next_test == "xray":
+        return (
+            f"{prefix}Please upload your **X-ray image** using the 📎 attachment button below the chat, "
+            "or say **'skip xray'** if you don't have one."
+        )
+    if next_test == "cbc":
+        return (
+            f"{prefix}Next, please provide your **CBC (Blood Test)** results. "
+            "Say **'give cbc form'** for the form, or **'skip cbc'** to continue."
+        )
+    return (
+        f"{prefix}Next, please provide your **Spirometry** results. "
+        "Say **'give spirometry form'** for the form, or **'skip spirometry'** to continue."
+    )
 
 
 def test_collector_agent(state: AgentState) -> AgentState:
-    """
-    Test Collector Agent - processes test submissions and requests missing ones.
-    """
     state["current_step"] = "test_collector"
-    
-    # Reset modal flags every turn
     state["show_spirometry_form_modal"] = False
     state["show_cbc_form_modal"] = False
-    
-    # Get conversation context
-    conversation = state.get("conversation_history", [])
-    last_message = conversation[-1].get("content", "").lower() if conversation else ""
-    
-    # 1. IDENTIFY RECOMMENDED TESTS
-    recommended = state.get("tests_recommended", [])
-    if not recommended:
-        recommended = ["xray", "spirometry", "cbc"] # Default fallback
-        state["tests_recommended"] = recommended
 
-    # 2. PROCESS INCOMING DATA (Manual or Form)
+    conversation = state.get("conversation_history", [])
+    last_message = conversation[-1].get("content", "") if conversation else ""
+
+    recommended = state.get("tests_recommended") or ["xray", "cbc", "spirometry"]
+    state["tests_recommended"] = recommended
+
     just_collected = None
-    
-    # Check for X-ray (usually handled in router, but check here too)
-    if "x-ray image uploaded" in last_message or "[x-ray image uploaded" in last_message:
+
+    if "x-ray image uploaded" in last_message.lower() or "[x-ray image uploaded" in last_message.lower():
         if state.get("xray_available"):
             just_collected = "X-ray"
 
-    # Check for Spirometry
     if not state.get("spirometry_available"):
         spirom_data = _extract_spirometry_from_conversation(conversation)
         if spirom_data:
@@ -53,11 +143,9 @@ def test_collector_agent(state: AgentState) -> AgentState:
                 state["spirometry_available"] = True
                 state["spirometry_result"] = result
                 just_collected = "Spirometry"
-    elif "spirometry test results submitted" in last_message:
-        # If submitted via form, values are already in state.spirometry_result
+    elif "spirometry test results submitted" in last_message.lower():
         just_collected = "Spirometry"
 
-    # Check for CBC
     if not state.get("cbc_available"):
         cbc_data = _extract_cbc_from_conversation(conversation)
         if cbc_data:
@@ -66,151 +154,99 @@ def test_collector_agent(state: AgentState) -> AgentState:
                 state["cbc_available"] = True
                 state["cbc_result"] = result
                 just_collected = "CBC"
-    elif "cbc test results submitted" in last_message:
+    elif "cbc test results submitted" in last_message.lower():
         just_collected = "CBC"
 
-    # 3. HANDLE SKIP REQUESTS
-    if "skip" in last_message:
-        target_skipped = None
-        
-        # Priority 1: Check if user named a specific test to skip
-        if "xray" in last_message or "x-ray" in last_message:
-            target_skipped = "xray"
-        elif "spirometry" in last_message:
-            target_skipped = "spirometry"
-        elif "cbc" in last_message:
-            target_skipped = "cbc"
-        
-        # Priority 2: Generic "skip" - find first missing recommended test
-        if not target_skipped:
-            missing_tests_list = state.get("missing_tests", [])
-            for t in recommended:
-                is_avail = (t == "xray" and state.get("xray_available")) or \
-                           (t == "spirometry" and state.get("spirometry_available")) or \
-                           (t == "cbc" and state.get("cbc_available"))
-                if not is_avail and t not in missing_tests_list:
-                    target_skipped = t
-                    break
-        
-        if target_skipped:
-            if target_skipped not in state.get("missing_tests", []):
-                state.setdefault("missing_tests", []).append(target_skipped)
-                test_names = {"xray": "X-ray", "spirometry": "Spirometry", "cbc": "CBC"}
-                just_collected = f"{test_names.get(target_skipped, target_skipped)} (skipped)"
-
-    # 4. HANDLE FORM REQUESTS
-    if "form" in last_message:
-        if "spirometry" in last_message and not state.get("spirometry_available"):
-            state["show_spirometry_form_modal"] = True
-            state["message"] = "I've opened the **Spirometry Form** for you. Please enter the FEV1 and FVC values from your report and click submit."
-            return state
-        if "cbc" in last_message and not state.get("cbc_available"):
-            state["show_cbc_form_modal"] = True
-            state["message"] = "I've opened the **CBC Form** for you. Please enter your blood count values and click submit."
-            return state
-
-        # Generic request like "form" / "show me the form":
-        # open whichever recommended test is currently pending next.
-        missing_tests = state.get("missing_tests", [])
-        pending_tests = [
-            t for t in recommended
-            if (t == "spirometry" and not state.get("spirometry_available") and "spirometry" not in missing_tests)
-            or (t == "cbc" and not state.get("cbc_available") and "cbc" not in missing_tests)
-        ]
-
-        if pending_tests:
-            next_form_test = pending_tests[0]
-            if next_form_test == "spirometry":
-                state["show_spirometry_form_modal"] = True
-                state["message"] = "I've opened the **Spirometry Form** for you. Please enter the FEV1 and FVC values from your report and click submit."
-                return state
-            if next_form_test == "cbc":
-                state["show_cbc_form_modal"] = True
-                state["message"] = "I've opened the **CBC Form** for you. Please enter your blood count values and click submit."
-                return state
-
-    # 5. DETERMINE NEXT ACTION
-    missing_tests = state.get("missing_tests", [])
-    xray_avail = state.get("xray_available", False)
-    spirom_avail = state.get("spirometry_available", False)
-    cbc_avail = state.get("cbc_available", False)
-    
-    # Filter recommended to only those not handled
-    todo = [t for t in recommended if 
-            (t == "xray" and not xray_avail and "xray" not in missing_tests) or
-            (t == "spirometry" and not spirom_avail and "spirometry" not in missing_tests) or
-            (t == "cbc" and not cbc_avail and "cbc" not in missing_tests)]
-
-    if not todo:
-        # All done!
+    pending = _pending_tests(state, recommended)
+    if not pending:
         return _structure_final_output(state)
 
-    # Pick the next test in sequence
-    next_test = todo[0]
-    
-    ack = f"Thank you for providing the {just_collected}. " if just_collected else ""
-    
-    if next_test == "xray":
-        state["message"] = f"{ack}Next, I need your **X-ray image**. Please upload it using the button below, or say 'skip' if you don't have it."
-    elif next_test == "cbc":
-        state["message"] = f"{ack}Next, I recommend providing your **CBC (Blood Test)** results. You can ask me to show you the form or provide values manually. Say 'skip' to move on."
-    elif next_test == "spirometry":
-        state["message"] = f"{ack}Next, please provide your **Spirometry (Lung Function)** results. You can ask me for the form or provide values manually. Say 'skip' to move on."
+    actions = _parse_test_actions_llm(state, last_message, pending)
 
+    for action in actions:
+        atype = action["type"]
+        test = action["test"]
+        if atype == "skip":
+            _apply_skip(state, test)
+        elif atype == "show_form" and test == "spirometry" and "spirometry" in pending:
+            state["show_spirometry_form_modal"] = True
+            state["message"] = (
+                "I've opened the **Spirometry Form**. Enter FEV1 and FVC from your report, then submit."
+            )
+            return state
+        elif atype == "show_form" and test == "cbc" and "cbc" in pending:
+            state["show_cbc_form_modal"] = True
+            state["message"] = (
+                "I've opened the **CBC Form**. Enter your blood count values, then submit."
+            )
+            return state
+        elif atype == "prompt_upload" and test == "xray" and "xray" in pending:
+            state["message"] = (
+                "Please upload your **X-ray image** using the 📎 attachment button below the chat, "
+                "or say **'skip xray'** if you don't have one."
+            )
+            return state
+
+    pending = _pending_tests(state, recommended)
+    if not pending:
+        ack = f"Thank you for providing the {just_collected}." if just_collected else ""
+        return _structure_final_output(state, ack=ack)
+
+    if just_collected:
+        state["message"] = _message_for_next_test(state, pending[0], f"Thank you for providing the {just_collected}.")
+        return state
+
+    state["message"] = _message_for_next_test(state, pending[0])
     return state
 
 
 def _extract_cbc_from_conversation(conversation: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
-    """Extract CBC values from conversation."""
     last_message = conversation[-1].get("content", "") if conversation else ""
-    
-    def safe_float(match: Optional["re.Match"]) -> Optional[float]:
-        if not match: return None
-        val = match.group(1)
-        try: return float(val)
-        except: return None
 
-    # Extraction patterns for all possible CBC fields
+    def safe_float(match: Optional[re.Match]) -> Optional[float]:
+        if not match:
+            return None
+        try:
+            groups = match.groups()
+            val = groups[-1] if len(groups) > 1 else groups[0]
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     patterns = {
-        "WBC": re.search(r'wbc[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "RBC": re.search(r'rbc[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "HGB": re.search(r'(hgb|hemoglobin)[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "HCT": re.search(r'(hct|hematocrit)[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "PLT": re.search(r'(plt|platelets)[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "MCV": re.search(r'mcv[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "MCH": re.search(r'mch[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "MCHC": re.search(r'mchc[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "LYMp": re.search(r'lymp[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "NEUTp": re.search(r'neutp[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "LYMn": re.search(r'lymn[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "NEUTn": re.search(r'neutn[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "PDW": re.search(r'pdw[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
-        "PCT": re.search(r'pct[:\s=]+([\d.]+)', last_message, re.IGNORECASE),
+        "WBC": re.search(r"wbc[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "RBC": re.search(r"rbc[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "HGB": re.search(r"(hgb|hemoglobin)[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "HCT": re.search(r"(hct|hematocrit)[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "PLT": re.search(r"(plt|platelets)[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "MCV": re.search(r"mcv[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "MCH": re.search(r"mch[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "MCHC": re.search(r"mchc[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "LYMp": re.search(r"lymp[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "NEUTp": re.search(r"neutp[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "LYMn": re.search(r"lymn[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "NEUTn": re.search(r"neutn[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "PDW": re.search(r"pdw[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
+        "PCT": re.search(r"pct[:\s=]+([\d.]+)", last_message, re.IGNORECASE),
     }
-    
+
     if any(patterns.values()):
         return {k: safe_float(v) for k, v in patterns.items()}
     return None
 
 
 def _extract_spirometry_from_conversation(conversation: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
-    """Extract Spirometry values from conversation."""
     last_message = conversation[-1].get("content", "") if conversation else ""
-    fev1_match = re.search(r'fev1[:\s=]+([\d.]+)', last_message, re.IGNORECASE)
-    fvc_match = re.search(r'fvc[:\s=]+([\d.]+)', last_message, re.IGNORECASE)
-    
+    fev1_match = re.search(r"fev1[:\s=]+([\d.]+)", last_message, re.IGNORECASE)
+    fvc_match = re.search(r"fvc[:\s=]+([\d.]+)", last_message, re.IGNORECASE)
+
     if fev1_match and fvc_match:
-        return {
-            "fev1": float(fev1_match.group(1)),
-            "fvc": float(fvc_match.group(1))
-        }
+        return {"fev1": float(fev1_match.group(1)), "fvc": float(fvc_match.group(1))}
     return None
 
 
 def _call_cbc_ml_api_tool(cbc_data: Dict[str, Any], age, gender) -> Optional[Dict[str, Any]]:
-    """Call CBC ML API with all 14 required columns."""
     try:
-        # Prepare input data with ALL 14 columns required by the model
         input_data = {
             "WBC": float(cbc_data.get("WBC") or 7.0),
             "LYMp": float(cbc_data.get("LYMp") or 30.0),
@@ -225,21 +261,18 @@ def _call_cbc_ml_api_tool(cbc_data: Dict[str, Any], age, gender) -> Optional[Dic
             "MCHC": float(cbc_data.get("MCHC") or 33.0),
             "PLT": float(cbc_data.get("PLT") or 250.0),
             "PDW": float(cbc_data.get("PDW") or 12.0),
-            "PCT": float(cbc_data.get("PCT") or 0.2)
+            "PCT": float(cbc_data.get("PCT") or 0.2),
         }
-        
-        # Call the actual ML model function
         prediction = predict_blood_disease(input_data)
-        
         return {
             "input_values": input_data,
             "prediction": {
                 "disease_name": prediction.get("disease_name", "Unknown"),
-                "confidence": float(prediction.get("confidence", 0.0))
-            }
+                "confidence": float(prediction.get("confidence", 0.0)),
+            },
         }
     except Exception as e:
-        print(f"ERROR: CBC ML call failed: {e}")
+        logger.error(f"CBC ML call failed: {e}")
         return None
 
 
@@ -247,33 +280,27 @@ def _call_spirometry_ml_api_tool(spirometry_data: Dict[str, Any], age, gender) -
     try:
         fev1 = float(spirometry_data["fev1"])
         fvc = float(spirometry_data["fvc"])
-        
-        # CORRECT CALCULATION: Baseline_FEV1_FVC_Ratio = FEV1 / FVC
-        # Make sure FVC is not zero
         ratio = fev1 / fvc if fvc > 0 else 0.0
-        
+
         input_data = {
-            "sex": "Male" if str(gender).lower().startswith('m') else "Female",
+            "sex": "Male" if str(gender).lower().startswith("m") else "Female",
             "age": float(age or 45),
             "fev1": fev1,
             "fvc": fvc,
-            "fev1_fvc": ratio, # Pass calculated ratio
-            "height": 170.0, "weight": 70.0, "bmi": 24.0, "race": "White"
+            "fev1_fvc": ratio,
+            "height": 170.0,
+            "weight": 70.0,
+            "bmi": 24.0,
+            "race": "White",
         }
-        # Get binary predictions (0 or 1)
         predictions = predict_spirometry(input_data)
-        # Get raw probabilities (0.0 to 1.0)
         probabilities = predict_spirometry_proba(input_data)
-        
-        # Determine pattern and confidence
+
         pattern = "Normal"
         confidence = 0.0
-        
-        # Check if any disease model returned positive (1)
         active_diseases = [k for k, v in predictions.items() if v == 1]
-        
+
         if active_diseases:
-            # Finding is a disease. Confidence is the probability of the most likely disease found.
             max_p = 0.0
             best_d = "Normal"
             for d in active_diseases:
@@ -283,48 +310,47 @@ def _call_spirometry_ml_api_tool(spirometry_data: Dict[str, Any], age, gender) -
             pattern = best_d
             confidence = max_p
         else:
-            # Finding is Normal. Confidence is 1 - highest disease probability.
-            # We want to show how sure we are it is NOT a disease.
             max_disease_p = max(probabilities.values()) if probabilities else 0.0
-            pattern = "Normal"
             confidence = 1.0 - max_disease_p
-            
-        # CLIP CONFIDENCE to realistic range (don't always show 100% unless it truly is)
-        if confidence > 0.999: confidence = 0.999
-        if confidence < 0.01: confidence = 0.01
-        
+
+        confidence = min(max(confidence, 0.01), 0.999)
+
         return {
             "input_values": input_data,
             "pattern": pattern,
-            "severity": "Normal" if pattern == "Normal" else "Mild", 
+            "severity": "Normal" if pattern == "Normal" else "Mild",
             "confidence": float(confidence),
-            "prediction": {"pattern": pattern, "confidence": float(confidence)}
+            "prediction": {"pattern": pattern, "confidence": float(confidence)},
         }
     except Exception as e:
-        print(f"ERROR: Spirometry ML call failed: {e}")
+        logger.error(f"Spirometry ML call failed: {e}")
         return None
 
 
-def _structure_final_output(state: AgentState) -> AgentState:
-    doctor_note = state.get("doctor_note", "")
+def _structure_final_output(state: AgentState, ack: str = "") -> AgentState:
     results = []
     if state.get("xray_available") and state.get("xray_result"):
         p = state["xray_result"].get("prediction", {})
         results.append(f"X-ray: {p.get('disease_name')} ({p.get('confidence', 0):.1%})")
     if state.get("spirometry_available") and state.get("spirometry_result"):
-        res = state['spirometry_result']
-        p = res.get('prediction', {})
-        conf = res.get('confidence', p.get('confidence', 0))
+        res = state["spirometry_result"]
+        conf = res.get("confidence", res.get("prediction", {}).get("confidence", 0))
         results.append(f"Spirometry: {res.get('pattern')} ({conf:.1%})")
     if state.get("cbc_available") and state.get("cbc_result"):
         p = state["cbc_result"].get("prediction", {})
         results.append(f"CBC: {p.get('disease_name')} ({p.get('confidence', 0):.1%})")
-    
-    missing = state.get("missing_tests", [])
-    if missing: results.append(f"Skipped: {', '.join(missing)}")
 
-    test_summary = "\n".join(results)
-    state["message"] = f"{doctor_note}\n\n**Diagnostic Test Results:**\n{test_summary}\n\nProceeding with diagnosis."
+    missing = state.get("missing_tests", [])
+    if missing:
+        results.append(f"Skipped: {', '.join(missing)}")
+
+    test_summary = "\n".join(results) if results else "No tests submitted."
+    intro = f"{ack}\n\n" if ack else ""
+    state["message"] = (
+        f"{intro}**All requested tests are complete.**\n\n"
+        f"**Results:**\n{test_summary}\n\n"
+        "I'm now preparing your diagnosis and treatment plan..."
+    )
     state["test_collection_complete"] = True
     state["test_collector_findings"] = test_summary
     return state

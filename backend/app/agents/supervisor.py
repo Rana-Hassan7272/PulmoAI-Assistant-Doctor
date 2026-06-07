@@ -117,6 +117,22 @@ def _validate_llm_decision(decision: str, flags: Dict[str, Any], state: AgentSta
         logger.warning("Supervisor: LLM skipped test_collector — overriding")
         return "test_collector"
 
+    if decision == "doctor_note_generator" and flags["doctor_note_ready"]:
+        logger.warning("Supervisor: LLM wanted doctor_note_generator but note already exists — overriding")
+        if flags["tests_recommended"] and not flags["test_collection_complete"]:
+            return "test_collector"
+        if not flags["treatment_plan_ready"]:
+            return "rag_treatment_planner"
+        if flags["treatment_plan_ready"] and not flags["treatment_approved"]:
+            return "treatment_approval"
+        if flags["treatment_approved"] and not flags["dosage_calculated"]:
+            return "dosage_calculator"
+        if not flags["final_report_ready"]:
+            return "report_generator"
+        if not flags["history_saved"]:
+            return "history_saver"
+        return "end"
+
     if decision == "history_saver" and flags["history_saved"]:
         logger.warning("Supervisor: LLM wanted history_saver but already saved — overriding to end")
         return "end"
@@ -196,17 +212,7 @@ def supervisor_agent(state: AgentState) -> AgentState:
     flags = _compute_workflow_flags(state)
     state["test_collection_complete"] = flags["test_collection_complete"]
 
-    next_agent = "end"
-    try:
-        llm_decision = _llm_routing(state, flags)
-        logger.info(f"Supervisor: LLM decision = '{llm_decision}'")
-        next_agent = _validate_llm_decision(llm_decision, flags, state)
-        if next_agent != llm_decision:
-            logger.info(f"Supervisor: overridden to '{next_agent}'")
-    except Exception as exc:
-        logger.warning(f"Supervisor: LLM routing failed ({exc}), using rule-based fallback")
-        next_agent = _rule_based_routing(state, flags)
-
+    next_agent = _rule_based_routing(state, flags)
     state["next_step"] = next_agent
     return state
 
