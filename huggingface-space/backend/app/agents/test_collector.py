@@ -58,8 +58,11 @@ def test_collector_agent(state: AgentState) -> AgentState:
     conversation = state.get("conversation_history", [])
     last_message = conversation[-1].get("content", "") if conversation else ""
 
-    recommended = state.get("tests_recommended") or ["xray", "cbc", "spirometry"]
-    state["tests_recommended"] = recommended
+    recommended = state.get("tests_recommended") or []
+    if not recommended:
+        from .intent_router import recommend_tests_llm
+        recommended = recommend_tests_llm(state)
+        state["tests_recommended"] = recommended
 
     just_collected = None
 
@@ -299,5 +302,6 @@ def _structure_final_output(state: AgentState, ack: str = "") -> AgentState:
         "I'm now preparing your diagnosis and treatment plan..."
     )
     state["test_collection_complete"] = True
+    state["auto_run_treatment_plan"] = not state.get("treatment_plan")
     state["test_collector_findings"] = test_summary
     return state

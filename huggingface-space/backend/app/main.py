@@ -163,9 +163,18 @@ def startup():
                 reset_predictor()
                 logger.warning(f"X-ray model warm-up failed: {e}")
 
+        def _warmup_rag():
+            try:
+                from .agents.rag.rag_agent import get_rag_agent
+                get_rag_agent()
+                logger.info("RAG embedding model warm-up completed")
+            except Exception as e:
+                logger.warning(f"RAG warm-up failed: {e}")
+
         import threading
 
         threading.Thread(target=_warmup_xray_model, daemon=True).start()
+        threading.Thread(target=_warmup_rag, daemon=True).start()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise

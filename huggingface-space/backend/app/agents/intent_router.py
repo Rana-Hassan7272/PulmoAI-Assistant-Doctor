@@ -67,6 +67,44 @@ def _normalize_test_name(name: str) -> Optional[str]:
     return None
 
 
+def normalize_clinical_text(text: str, kind: str = "symptoms") -> str:
+    if not text or len(text.strip()) < 8:
+        return text.strip() if text else ""
+
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Rewrite the patient's message into clear clinical English. "
+                    "Fix typos and grammar but keep the same meaning. "
+                    "Do not add new symptoms or diagnoses. "
+                    "Return JSON: {\"normalized\": \"...\"}"
+                ),
+            },
+            {"role": "user", "content": f"Type: {kind}\nText: {text}"},
+        ]
+        raw = call_groq_llm(messages, temperature=0.0, json_mode=True)
+        data = _parse_json_llm(raw)
+        normalized = str(data.get("normalized", "")).strip()
+        if normalized and len(normalized) >= 3:
+            return normalized
+    except Exception as exc:
+        logger.warning(f"Clinical text normalization failed: {exc}")
+    return text.strip()
+
+
+def _is_test_command_message(message: str) -> bool:
+    msg = message.lower()
+    if not msg.strip():
+        return False
+    markers = (
+        "skip", "xray", "x-ray", "cbc", "spiro", "upload", "form",
+        "fev1", "fvc", "blood", "chest", "image uploaded", "submitted",
+    )
+    return any(m in msg for m in markers)
+
+
 def _sanitize_test_list(tests: Any) -> List[str]:
     if not isinstance(tests, list):
         return []
@@ -88,11 +126,16 @@ def recommend_tests_llm(state: AgentState) -> List[str]:
         {
             "role": "system",
             "content": (
-                "You are a pulmonology assistant. Choose which diagnostic tests to recommend "
-                "from ONLY these three options: xray, cbc, spirometry.\n"
-                "Return JSON: {\"tests\": [\"xray\", \"cbc\", \"spirometry\"], \"reason\": \"...\"}\n"
-                "Pick 1-3 tests based on clinical need. You may recommend all three when appropriate.\n"
-                "Never return tests outside xray, cbc, spirometry."
+                "You are a pulmonology assistant. Recommend the MINIMUM necessary tests "
+                "from ONLY: xray, cbc, spirometry.\n"
+                "Return JSON: {\"tests\": [\"...\"], \"reason\": \"...\"}\n\n"
+                "Rules:\n"
+                "- Return 1, 2, or 3 tests — never default to all three unless clinically justified.\n"
+                "- Mild isolated cough/wheeze → often spirometry only.\n"
+                "- Fever + cough/chest pain → often xray + cbc.\n"
+                "- Infection suspicion without imaging need → cbc only possible.\n"
+                "- Complex or unclear cases → 2-3 tests as needed.\n"
+                "- Never return tests outside xray, cbc, spirometry."
             ),
         },
         {
@@ -231,14 +274,51 @@ def parse_approval_intent(state: AgentState) -> Dict[str, Any]:
     lower = last_msg.lower()
     if any(w in lower for w in ("yes", "approve", "accept", "proceed", "agreed", "looks good", "ok")):
         return {"intent": "approve", "reason": "pattern fallback"}
-    if any(w in lower for w in ("xray", "cbc", "spiro", "upload", "form", "test", "skip")):
+    if any(w in lower for w in ("give", "upload", "form", "provide", "need", "want")) and any(
+        t in lower for t in ("xray", "cbc", "spiro", "blood", "chest")
+    ):
         return {"intent": "more_tests", "reason": "pattern fallback"}
     return {"intent": "unclear", "reason": "pattern fallback"}
 
 
 def route_user_intent(state: AgentState, flags: Dict[str, Any]) -> Dict[str, Any]:
     last_msg = last_user_message(state)
-    context = _conversation_snippet(state, 8)
+    pending = flags.get("pending_tests") or []
+
+    if pending and _is_test_command_message(last_msg):
+        actions = _parse_test_actions_pattern(last_msg, pending)
+        if actions:
+            logger.info(f"Fast-path test_collector: {actions}")
+            return {
+                "next_agent": "test_collector",
+                "user_intent": "test_command",
+                "test_actions": actions,
+                "clear_treatment_plan": False,
+                "reason": "fast-path test command",
+            }
+
+    if pending:
+        return {
+            "next_agent": "test_collector",
+            "user_intent": "pending_tests",
+            "test_actions": _parse_test_actions_pattern(last_msg, pending) if last_msg else [],
+            "clear_treatment_plan": False,
+            "reason": "pending tests must be collected first",
+        }
+
+    if flags.get("treatment_plan_ready") and not flags.get("treatment_approved"):
+        lower = last_msg.lower()
+        wants_tests = any(w in lower for w in ("give", "upload", "form", "provide", "want", "need", "more test"))
+        if wants_tests and _is_test_command_message(last_msg):
+            return {
+                "next_agent": "test_collector",
+                "user_intent": "more_tests",
+                "test_actions": [],
+                "clear_treatment_plan": True,
+                "reason": "user requested more tests during treatment review",
+            }
+
+    context = _conversation_snippet(state, 6)
 
     workflow = (
         f"patient_confirmed={flags['patient_confirmed']}\n"
@@ -342,7 +422,7 @@ def _route_user_intent_fallback(
 ) -> Dict[str, Any]:
     agent = _rule_based_routing(state, flags)
     pending = flags.get("pending_tests") or []
-    test_actions = parse_test_actions(last_msg, pending) if pending else []
+    test_actions = _parse_test_actions_pattern(last_msg, pending) if pending else []
     return {
         "next_agent": agent,
         "user_intent": "fallback",
@@ -355,6 +435,9 @@ def _route_user_intent_fallback(
 def validate_routing_decision(decision: Dict[str, Any], flags: Dict[str, Any], state: AgentState) -> str:
     agent = decision.get("next_agent", "end")
 
+    if flags.get("pending_tests"):
+        return "test_collector"
+
     if agent == "emergency_detector" and flags["emergency_checked"]:
         agent = "doctor_note_generator" if not flags["doctor_note_ready"] else "test_collector"
 
@@ -363,6 +446,14 @@ def validate_routing_decision(decision: Dict[str, Any], flags: Dict[str, Any], s
 
     if agent == "rag_treatment_planner" and flags.get("pending_tests"):
         agent = "test_collector"
+
+    if agent == "rag_treatment_planner" and flags["treatment_plan_ready"]:
+        if not flags["treatment_approved"]:
+            agent = "treatment_approval"
+        elif not flags["dosage_calculated"]:
+            agent = "dosage_calculator"
+        else:
+            agent = "end"
 
     if agent == "doctor_note_generator" and flags["doctor_note_ready"]:
         if flags.get("pending_tests"):
@@ -399,6 +490,7 @@ def apply_routing_to_state(state: AgentState, decision: Dict[str, Any]) -> None:
         state["home_remedies"] = []
         state["followup_instruction"] = None
         state["test_collection_complete"] = False
+        state["force_treatment_regen"] = True
 
     actions = decision.get("test_actions") or []
     if actions:

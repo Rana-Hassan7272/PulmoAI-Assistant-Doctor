@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, List, Union
 from .state import AgentState
 from .config import call_groq_llm
+from .intent_router import normalize_clinical_text
 from .tools import fetch_patient_history_tool, hydrate_agent_state_from_patient, save_patient_profile_tool
 from ..core.error_handling import (
     LLMError, LLMInvalidResponseError, log_error_with_context
@@ -80,7 +81,7 @@ def _capture_symptoms_directly(state: AgentState, conversation: List[Dict[str, s
         return False
     if _is_confirmation_message(last_user) or _is_workflow_action_message(last_user):
         return False
-    state["symptoms"] = last_user.strip()
+    state["symptoms"] = normalize_clinical_text(last_user.strip(), "symptoms")
     duration_match = re.search(
         r"(?:for|lasting|last)\s+(\d+\s*(?:days?|weeks?|months?|hours?)|last few days)",
         last_user,
@@ -292,7 +293,7 @@ def patient_intake_agent(state: AgentState) -> AgentState:
         if extracted.symptoms:
             symptom_text = extracted.symptoms.strip().lower()
             if symptom_text not in _SYMPTOM_BLOCKLIST and len(symptom_text) > 3:
-                state["symptoms"] = extracted.symptoms
+                state["symptoms"] = normalize_clinical_text(extracted.symptoms.strip(), "symptoms")
         if extracted.duration:
             state["symptom_duration"] = extracted.duration
 

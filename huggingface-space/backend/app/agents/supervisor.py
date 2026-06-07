@@ -78,6 +78,8 @@ def supervisor_agent(state: AgentState) -> AgentState:
     decision = route_user_intent(state, flags)
     apply_routing_to_state(state, decision)
 
+    flags = _compute_workflow_flags(state)
+    state["test_collection_complete"] = flags["test_collection_complete"]
     next_agent = validate_routing_decision(decision, flags, state)
 
     if flags.get("pending_tests"):

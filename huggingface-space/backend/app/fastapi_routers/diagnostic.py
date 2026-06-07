@@ -223,7 +223,7 @@ async def chat_with_agent(
         # Use visit_id as thread_id for LangGraph checkpointing
         config = {
             "configurable": {"thread_id": visit_id},
-            "recursion_limit": 100  # Increase recursion limit for chat interactions (was 50, increased to handle complex workflows)
+            "recursion_limit": 20
         }
         
         # Get current state from LangGraph checkpointer

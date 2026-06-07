@@ -69,7 +69,11 @@ def create_diagnostic_graph():
     })
     
     workflow.add_edge("doctor_note_generator", END)
-    workflow.add_conditional_edges("test_collector", check_test_collection_complete, {"complete": "supervisor", "awaiting_tests": END})
+    workflow.add_conditional_edges("test_collector", check_test_collection_complete, {
+        "complete": "supervisor",
+        "awaiting_tests": END,
+        "awaiting_rag": "rag_specialist",
+    })
     workflow.add_conditional_edges("rag_specialist", check_treatment_approval, {"awaiting_approval": END, "approved": "supervisor"})
     workflow.add_conditional_edges("treatment_approval", check_treatment_approval, {
         "awaiting_approval": END,
@@ -128,17 +132,30 @@ def doctor_note_generator_agent(state: AgentState) -> AgentState:
     state["doctor_note"] = note
 
     state["tests_recommended"] = recommend_tests_llm(state)
-    rec_text = ", ".join([t.upper() for t in state["tests_recommended"]])
+    tests = state["tests_recommended"]
+    if len(tests) == 1:
+        rec_text = tests[0].upper()
+        rec_line = f"I recommend **{rec_text}** for your symptoms."
+    else:
+        rec_text = ", ".join([t.upper() for t in tests])
+        rec_line = f"I recommend: **{rec_text}**."
     state["message"] = (
         f"**Clinical Assessment:**\n{note}\n\n"
-        f"Based on this, I recommend: **{rec_text}**. "
-        "You can ask for a form or provide values manually. Which would you like to provide first?"
+        f"Based on this, {rec_line} "
+        "Say **give form** or **skip** for any test you cannot provide."
     )
     return state
 
 
 def rag_specialist_agent(state: AgentState) -> AgentState:
     from .tools import rag_treatment_planner_tool
+
+    if state.get("treatment_plan") and not state.get("force_treatment_regen"):
+        state["message"] = state.get("message") or (
+            "Your treatment plan is ready. Please review it and let me know if you approve."
+        )
+        return state
+
     result = rag_treatment_planner_tool(state)
     state["diagnosis"] = result["diagnosis"]
     state["treatment_plan"] = result["treatment_plan"]
@@ -167,6 +184,7 @@ def rag_specialist_agent(state: AgentState) -> AgentState:
     message_parts.append("\nPlease review this plan and let me know if you approve it. If you have any questions about the medications or treatment, I'm here to help!")
     
     state["message"] = "\n".join(message_parts)
+    state["force_treatment_regen"] = False
     return state
 
 
@@ -186,6 +204,7 @@ def treatment_approval_agent(state: AgentState) -> AgentState:
     elif intent == "more_tests":
         state["redirect_to_test_collector"] = True
         state["test_collection_complete"] = False
+        state["force_treatment_regen"] = True
         state["treatment_plan"] = None
         state["diagnosis"] = None
         state["message"] = (
@@ -272,5 +291,11 @@ def check_treatment_approval(state):
     return "approved" if state.get("treatment_approved") else "awaiting_approval"
 
 def check_test_collection_complete(state):
-    if state.get("test_collection_complete"): return "complete"
-    return "awaiting_tests"
+    if not state.get("test_collection_complete"):
+        return "awaiting_tests"
+    if state.get("treatment_plan") and not state.get("force_treatment_regen"):
+        return "complete"
+    if state.get("auto_run_treatment_plan"):
+        state["auto_run_treatment_plan"] = False
+        return "awaiting_rag"
+    return "complete"
