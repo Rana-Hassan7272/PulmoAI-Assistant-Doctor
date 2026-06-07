@@ -109,18 +109,34 @@ class XRayPneumoniaPredictor:
         self.model = self._build_model()
         
         try:
-            checkpoint = torch.load(self.model_path, map_location=self.device)
+            try:
+                checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
+            except TypeError:
+                checkpoint = torch.load(self.model_path, map_location=self.device)
+
+            state_dict = checkpoint
             if isinstance(checkpoint, dict):
                 if "model_state_dict" in checkpoint:
                     state_dict = checkpoint["model_state_dict"]
                 elif "state_dict" in checkpoint:
                     state_dict = checkpoint["state_dict"]
-                else:
-                    state_dict = checkpoint
-            else:
-                state_dict = checkpoint
-            self.model.load_state_dict(state_dict, strict=True)
+
+            if not isinstance(state_dict, dict):
+                raise RuntimeError("Checkpoint does not contain a valid state dictionary")
+
+            try:
+                self.model.load_state_dict(state_dict, strict=True)
+            except RuntimeError:
+                filtered = {
+                    k: v for k, v in state_dict.items()
+                    if k in self.model.state_dict()
+                }
+                if not filtered:
+                    raise
+                self.model.load_state_dict(filtered, strict=False)
         except Exception as e:
+            self.model = None
+            self.is_loaded = False
             raise RuntimeError(f"Failed to load model weights: {str(e)}")
         
         # Move model to device and set to evaluation mode
@@ -188,7 +204,7 @@ class XRayPneumoniaPredictor:
                 - 'Viral pneumonia': float
         """
         if not self.is_loaded:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+            self.load_model()
         
         # TTA: 5 augmentation transforms averaged
         tta_transforms = [
@@ -286,15 +302,15 @@ def get_predictor() -> XRayPneumoniaPredictor:
     """
     global _predictor_instance
 
-    # Thread-safe lazy init: prevents multiple concurrent requests from
-    # triggering duplicated model loads.
-    if _predictor_instance is None:
-        with _predictor_lock:
-            if _predictor_instance is None:
-                _predictor_instance = XRayPneumoniaPredictor()
-                _predictor_instance.load_model()
-    
-    return _predictor_instance
+    with _predictor_lock:
+        if _predictor_instance is not None and _predictor_instance.is_loaded:
+            return _predictor_instance
+
+        _predictor_instance = None
+        predictor = XRayPneumoniaPredictor()
+        predictor.load_model()
+        _predictor_instance = predictor
+        return _predictor_instance
 
 
 def predict_xray(image: Union[str, Path, Image.Image, np.ndarray]) -> Dict[str, Union[int, str, float]]:

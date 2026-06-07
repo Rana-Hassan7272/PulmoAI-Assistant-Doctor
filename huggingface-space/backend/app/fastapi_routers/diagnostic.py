@@ -370,7 +370,10 @@ async def chat_with_agent(
                         "confidence": float(prediction.get("confidence", 0.0))
                     },
                     "probabilities": {
-                        "no_disease": float(probabilities.get("No disease", 0.0)),
+                        "no_disease": float(
+                            probabilities.get("NORMAL")
+                            or probabilities.get("No disease", 0.0)
+                        ),
                         "bacterial_pneumonia": float(probabilities.get("Bacterial pneumonia", 0.0)),
                         "viral_pneumonia": float(probabilities.get("Viral pneumonia", 0.0))
                     }
