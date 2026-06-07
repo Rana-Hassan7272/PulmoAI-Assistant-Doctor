@@ -801,8 +801,24 @@ def merge_client_state_snapshot(state: AgentState, snapshot: Optional[Dict[str, 
 
     client_conv = snapshot.get("conversation_history") or []
     server_conv = state.get("conversation_history") or []
-    if isinstance(client_conv, list) and len(client_conv) > len(server_conv):
-        state["conversation_history"] = client_conv
+    if isinstance(client_conv, list) and client_conv:
+        client_has_assistant = any(m.get("role") == "assistant" for m in client_conv if isinstance(m, dict))
+        server_has_assistant = any(m.get("role") == "assistant" for m in server_conv if isinstance(m, dict))
+        if client_has_assistant and not server_has_assistant:
+            state["conversation_history"] = client_conv
+        elif len(client_conv) > len(server_conv):
+            state["conversation_history"] = client_conv
+
+    client_step = snapshot.get("current_step")
+    server_step = state.get("current_step")
+    if client_step and (
+        not server_step
+        or (
+            server_step == "patient_intake_waiting_input"
+            and client_step in ("patient_intake_awaiting_confirmation", "patient_intake_complete")
+        )
+    ):
+        state["current_step"] = client_step
 
     return state
 

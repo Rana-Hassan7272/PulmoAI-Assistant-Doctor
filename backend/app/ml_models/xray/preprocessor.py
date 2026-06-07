@@ -108,10 +108,18 @@ class XRayPneumoniaPredictor:
         # Build model architecture
         self.model = self._build_model()
         
-        # Load trained weights
         try:
-            state_dict = torch.load(self.model_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
+            checkpoint = torch.load(self.model_path, map_location=self.device)
+            if isinstance(checkpoint, dict):
+                if "model_state_dict" in checkpoint:
+                    state_dict = checkpoint["model_state_dict"]
+                elif "state_dict" in checkpoint:
+                    state_dict = checkpoint["state_dict"]
+                else:
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+            self.model.load_state_dict(state_dict, strict=True)
         except Exception as e:
             raise RuntimeError(f"Failed to load model weights: {str(e)}")
         
