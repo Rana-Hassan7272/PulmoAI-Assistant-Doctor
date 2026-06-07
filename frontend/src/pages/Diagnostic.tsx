@@ -63,7 +63,6 @@ const Diagnostic = () => {
 
       if (response.emergency_flag) {
         setEmergencyFlag(true)
-        toast.error(response.emergency_reason || 'Emergency detected! Please seek immediate medical attention.')
       }
 
       if (response.state) {
@@ -261,7 +260,6 @@ const Diagnostic = () => {
       if (response.current_step) setCurrentStep(response.current_step)
       if (response.emergency_flag) {
         setEmergencyFlag(true)
-        toast.error('Emergency detected! Please seek immediate medical attention.')
       }
       if (response.state) setDiagnosticState(response.state)
       if (response.message) {
@@ -335,13 +333,16 @@ const Diagnostic = () => {
     } catch (error: any) {
       setMessages((prev) => prev.filter((msg) => !msg.isThinking))
 
+      const statusCode = error.response?.status
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to send message. Please try again.'
 
       if (
-        errorMessage.toLowerCase().includes('rate limit') ||
-        errorMessage.toLowerCase().includes('429') ||
-        errorMessage.toLowerCase().includes('quota') ||
-        errorMessage.toLowerCase().includes('processing')
+        statusCode === 429 ||
+        (statusCode !== 500 && (
+          errorMessage.toLowerCase().includes('rate limit') ||
+          errorMessage.toLowerCase().includes('429') ||
+          errorMessage.toLowerCase().includes('quota')
+        ))
       ) {
         setMessages((prev) => [
           ...prev,

@@ -194,7 +194,11 @@ def patient_intake_agent(state: AgentState) -> AgentState:
 
     if not state.get("patient_data_confirmed"):
         data = _extract_patient_data(conversation, symptoms_only=returning)
-        extracted = PatientExtraction.model_validate(data)
+        try:
+            extracted = PatientExtraction.model_validate(data)
+        except Exception:
+            fallback = _extract_symptoms_fallback(conversation) if returning else _extract_basic_info_fallback(conversation)
+            extracted = PatientExtraction.model_validate(fallback)
 
         if not returning:
             if extracted.name and not state.get("patient_name"):
@@ -244,12 +248,14 @@ def _extract_patient_data(conversation: List[Dict[str, str]], symptoms_only: boo
     if symptoms_only:
         system_prompt = (
             "Extract ONLY today's visit symptoms and duration from the latest user messages. "
-            "Return JSON with keys: symptoms (string), duration (string). Use null if missing."
+            "Return a single JSON object (not an array) with keys: symptoms (string), duration (string). "
+            "Use null if missing."
         )
     else:
         system_prompt = (
-            "Extract patient details into JSON with keys: name, age, gender, weight, smoker, "
-            "symptoms, duration, history, occupation. Use null for missing fields."
+            "Extract patient details into a single JSON object (not an array) with keys: "
+            "name, age, gender, weight, smoker, symptoms, duration, history, occupation. "
+            "Use null for missing fields."
         )
 
     messages = [
@@ -269,7 +275,21 @@ def _extract_patient_data(conversation: List[Dict[str, str]], symptoms_only: boo
             clean = clean.split("```json")[1].split("```")[0].strip()
         elif clean.startswith("```"):
             clean = clean.split("```")[1].split("```")[0].strip()
-        return json.loads(clean)
+        parsed = json.loads(clean)
+        if isinstance(parsed, list):
+            if not parsed:
+                return {}
+            if isinstance(parsed[0], dict):
+                merged: Dict[str, Any] = {}
+                for item in parsed:
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            if v is not None and k not in merged:
+                                merged[k] = v
+                            elif k == "symptoms" and v:
+                                merged[k] = f"{merged.get(k, '')}, {v}".strip(", ")
+                return merged or parsed[0]
+        return parsed if isinstance(parsed, dict) else {}
     except (LLMError, json.JSONDecodeError, LLMInvalidResponseError) as e:
         log_error_with_context(e, {"operation": "patient_data_extraction"})
         if symptoms_only:
@@ -289,8 +309,15 @@ def _extract_symptoms_fallback(conversation: List[Dict[str, str]]) -> Dict[str, 
             last_user = msg.get("content", "")
             break
     data: Dict[str, Any] = {}
-    if last_user and len(last_user.split()) > 2:
+    if last_user and len(last_user.strip()) > 10:
         data["symptoms"] = last_user.strip()
+        duration_match = re.search(
+            r'(?:for|lasting|last)\s+(\d+\s*(?:days?|weeks?|months?|hours?)|last few days)',
+            last_user,
+            re.IGNORECASE,
+        )
+        if duration_match:
+            data["duration"] = duration_match.group(1).strip()
     return data
 
 
