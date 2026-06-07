@@ -335,6 +335,41 @@ const Diagnostic = () => {
 
       const statusCode = error.response?.status
       const errorMessage = error.response?.data?.detail || error.message || 'Failed to send message. Please try again.'
+      const isTimeout = error.code === 'ECONNABORTED' || errorMessage.toLowerCase().includes('timeout')
+
+      const tryRecoverFromServer = async () => {
+        const recovered = await diagnosticService.recoverLatestMessage(visitId)
+        if (recovered) {
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', content: recovered, timestamp: new Date() },
+          ])
+          const state = await diagnosticService.getState(visitId).catch(() => null)
+          if (state) {
+            setDiagnosticState(state)
+            if (state.current_step) setCurrentStep(state.current_step)
+          }
+          return true
+        }
+        return false
+      }
+
+      if (isTimeout) {
+        const recovered = await tryRecoverFromServer()
+        if (recovered) {
+          toast.success('Your report was generated — loaded from session.')
+          return
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: 'Still generating your report. Please wait a few seconds and send any short message (e.g. "status") to load it.',
+            timestamp: new Date(),
+          },
+        ])
+        return
+      }
 
       if (
         statusCode === 429 ||
@@ -362,9 +397,12 @@ const Diagnostic = () => {
                 { role: 'assistant', content: retryResponse.message, timestamp: new Date() },
               ])
             }
+            processResponse(retryResponse)
           } catch {
-            setMessages((prev) => prev.filter((msg) => !msg.isThinking))
-            toast.error('Still processing. Please try again in a moment.')
+            const recovered = await tryRecoverFromServer()
+            if (!recovered) {
+              toast.error('Still processing. Please try again in a moment.')
+            }
           } finally {
             setLoading(false)
           }
@@ -372,9 +410,19 @@ const Diagnostic = () => {
         return
       }
 
-      toast.error(errorMessage)
+      const recovered = await tryRecoverFromServer()
+      if (!recovered) {
+        toast.error(errorMessage)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: 'Something went wrong. Your message was received — please try again in a moment.',
+            timestamp: new Date(),
+          },
+        ])
+      }
       console.error('Error sending message:', error)
-      setMessages((prev) => prev.slice(0, -1))
     } finally {
       setLoading(false)
     }

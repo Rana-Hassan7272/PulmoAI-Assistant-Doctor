@@ -24,33 +24,36 @@ logger = logging.getLogger(__name__)
 
 
 def recommend_tests(symptoms: str, age: Optional[int] = None, gender: Optional[str] = None) -> list[str]:
-    """
-    Recommend diagnostic tests based on patient symptoms.
-    """
-    recommended = []
-    symptoms_lower = symptoms.lower() if symptoms else ""
-    
-    # 1. Spirometry is a general test for lung function
-    if any(s in symptoms_lower for s in ["breath", "shortness", "asthma", "copd", "wheez", "cough", "tight"]):
-        recommended.append("spirometry")
-    else:
-        recommended.append("spirometry")
-        
-    # 2. X-ray for acute symptoms or chest pain
-    if any(s in symptoms_lower for s in ["fever", "pain", "chest", "pneumonia", "infection", "sharp", "productive", "blood", "cough"]):
-        recommended.append("xray")
-        
-    # 3. CBC if fever or infection is suspected
-    if any(s in symptoms_lower for s in ["fever", "infection", "weakness", "fatigue", "chills", "pain"]):
-        recommended.append("cbc")
-        
-    recommended = list(set(recommended))
-    if not recommended:
-        recommended = ["spirometry"]
+    s = (symptoms or "").lower()
+    tests: list[str] = []
 
-    order = ["xray", "cbc", "spirometry"]
-    recommended.sort(key=lambda test: order.index(test) if test in order else len(order))
-    return recommended
+    breath_issue = any(w in s for w in (
+        "wheez", "asthma", "copd", "shortness", "breathless", "breathing difficulty",
+        "tight chest", "obstruct", "fev", "spirom",
+    ))
+    infection = any(w in s for w in ("fever", "infection", "chills", "bacteria", "virus", "septic"))
+    chest_issue = "chest" in s and any(w in s for w in ("pain", "pressure", "tight", "discomfort"))
+    lung_issue = any(w in s for w in ("lung", "pneumonia", "infiltrate", "consolidation"))
+    cough_only = "cough" in s and not infection and not chest_issue and not lung_issue
+    allergy_cough = "allerg" in s and "cough" in s and not infection
+
+    if infection or "fatigue" in s or "weakness" in s:
+        tests.append("cbc")
+    if chest_issue or lung_issue or infection or "pneumonia" in s:
+        tests.append("xray")
+    if breath_issue:
+        tests.append("spirometry")
+    elif allergy_cough or cough_only:
+        tests.append("spirometry")
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for t in ("xray", "cbc", "spirometry"):
+        if t in tests and t not in seen:
+            ordered.append(t)
+            seen.add(t)
+
+    return ordered if ordered else ["spirometry"]
 
 
 def format_test_results_for_llm(state: AgentState) -> str:
@@ -785,9 +788,7 @@ def merge_client_state_snapshot(state: AgentState, snapshot: Optional[Dict[str, 
         "patient_data_confirmed", "doctor_note", "tests_recommended", "symptoms",
         "symptom_duration", "patient_name", "patient_age", "patient_gender",
         "patient_smoker", "patient_weight", "emergency_checked", "emergency_flag",
-        "xray_available", "spirometry_available", "cbc_available", "missing_tests",
-        "test_collection_complete", "treatment_plan", "treatment_approved",
-        "current_step", "diagnosis", "final_report",
+        "missing_tests", "current_step",
     )
     for key in merge_keys:
         client_val = snapshot.get(key)

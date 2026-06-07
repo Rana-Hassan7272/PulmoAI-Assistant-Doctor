@@ -74,7 +74,13 @@ frontend/
 
 ## 🔗 Backend Integration
 
-Make sure the backend is running on `http://localhost:8000` (or update `.env` file).
+Local: `http://localhost:8000` (update `.env` if different).
+
+Production:
+- **Frontend:** [pulmo-ai-assistant-doctor.vercel.app](https://pulmo-ai-assistant-doctor.vercel.app/)
+- **Backend API:** [hassan7272-pulmoai-backend.hf.space](https://hassan7272-pulmoai-backend.hf.space)
+
+Set `VITE_API_BASE_URL` to the backend URL. Chat timeout is 90s (RAG + treatment plan step).
 
 ## ✨ Features
 
@@ -85,17 +91,19 @@ Make sure the backend is running on `http://localhost:8000` (or update `.env` fi
 - Auto-login on page reload
 
 ### Diagnostic Workflow
-- Real-time chat interface
-- Patient intake with data extraction
+- Real-time chat interface (REST; WebSocket optional where supported)
+- Patient intake with LLM data extraction + returning-patient profile memory
+- Symptom typo cleanup and smoker status inferred from narrative (e.g. “smoking recently”)
 - Patient data confirmation (HITL)
-- Test upload (X-ray images)
-- Test input forms (Spirometry, CBC)
-- Test results display
-- Treatment plan display
-- Treatment approval (HITL)
-- Dosage calculation display
-- Final report generation
-- Progress indicator
+- Clinical assessment with **dynamic test recommendations** (1–3 of: X-ray, CBC, Spirometry — based on symptoms, not fixed all-three)
+- Test collection via natural language (`skip cbc`, `only spirometry form`, `cray` → X-ray typo handling)
+- Test upload (X-ray images) + forms (Spirometry, CBC)
+- Test results display with ML confidence scores
+- RAG-based treatment plan (pulmonology knowledge base)
+- Treatment approval (HITL) with redirect back to tests if user requests more
+- Dosage calculation + final PDF-style report
+- Workflow progress indicator (12 steps)
+- Session persistence via `visit_id` + LangGraph checkpointing
 
 ### Patient History
 - View previous visits

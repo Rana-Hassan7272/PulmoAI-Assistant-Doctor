@@ -115,7 +115,7 @@ async def diagnostic_ws(websocket: WebSocket):
 
                 client_visit_id = msg.get("visit_id")
                 visit_id = client_visit_id or str(uuid.uuid4())
-                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
+                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 20}
 
                 try:
                     snapshot = graph.get_state(config)
@@ -155,7 +155,7 @@ async def diagnostic_ws(websocket: WebSocket):
                 client_visit_id = msg.get("visit_id")
                 if client_visit_id and client_visit_id != visit_id:
                     visit_id = client_visit_id
-                    config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
+                    config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 20}
                     try:
                         snapshot = graph.get_state(config)
                         if snapshot and snapshot.values:
@@ -177,7 +177,7 @@ async def diagnostic_ws(websocket: WebSocket):
 
                 await _send(websocket, {"type": "stream_start"})
 
-                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 50}
+                config = {"configurable": {"thread_id": visit_id}, "recursion_limit": 20}
                 try:
                     result = graph.invoke(state, config=config)
                     state = result

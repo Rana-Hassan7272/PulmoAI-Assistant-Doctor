@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, List, Union
 from .state import AgentState
 from .config import call_groq_llm
+from .intent_router import normalize_clinical_text
 from .tools import fetch_patient_history_tool, hydrate_agent_state_from_patient, save_patient_profile_tool
 from ..core.error_handling import (
     LLMError, LLMInvalidResponseError, log_error_with_context
@@ -22,6 +23,18 @@ _TEST_ONLY_MESSAGES = {
     "ok give cbc", "give me xray", "give me cbc",
 }
 _SYMPTOM_BLOCKLIST = {"cbc", "xray", "x-ray", "spirometry", "spiromtery", "form", "yes", "no"}
+
+
+def _detect_smoker_from_text(text: str) -> Union[bool, None]:
+    lower = text.lower()
+    if re.search(r"\b(non[- ]?smok|never smoked|don't smoke|do not smoke|not a smoker)\b", lower):
+        return False
+    if re.search(
+        r"\b(smok|smoking|smoker|cigarette|cigarettes|tobacco|vap(e|ing)|chain[- ]?smok)\b",
+        lower,
+    ):
+        return True
+    return None
 
 
 def _normalize_extraction_dict(data: Any) -> Dict[str, Any]:
@@ -80,7 +93,10 @@ def _capture_symptoms_directly(state: AgentState, conversation: List[Dict[str, s
         return False
     if _is_confirmation_message(last_user) or _is_workflow_action_message(last_user):
         return False
-    state["symptoms"] = last_user.strip()
+    state["symptoms"] = normalize_clinical_text(last_user.strip(), "symptoms")
+    smoker_hint = _detect_smoker_from_text(last_user)
+    if smoker_hint is not None:
+        state["patient_smoker"] = smoker_hint
     duration_match = re.search(
         r"(?:for|lasting|last)\s+(\d+\s*(?:days?|weeks?|months?|hours?)|last few days)",
         last_user,
@@ -252,7 +268,11 @@ def patient_intake_agent(state: AgentState) -> AgentState:
         logger.info("Patient data confirmed and saved to profile")
         return state
 
-    if any(word in last_msg_lower for word in ["no", "wrong", "change", "incorrect", "not correct"]):
+    if awaiting_confirm and (
+        re.search(r"\b(no|wrong|incorrect)\b", last_msg_lower)
+        or "not correct" in last_msg_lower
+        or re.search(r"\bchange\b", last_msg_lower)
+    ):
         state["message"] = "I'm sorry. Please tell me what information is incorrect."
         state["current_step"] = "patient_intake_waiting_input"
         return state
@@ -288,9 +308,15 @@ def patient_intake_agent(state: AgentState) -> AgentState:
         if extracted.symptoms:
             symptom_text = extracted.symptoms.strip().lower()
             if symptom_text not in _SYMPTOM_BLOCKLIST and len(symptom_text) > 3:
-                state["symptoms"] = extracted.symptoms
+                state["symptoms"] = normalize_clinical_text(extracted.symptoms.strip(), "symptoms")
         if extracted.duration:
             state["symptom_duration"] = extracted.duration
+        if extracted.smoker is not None:
+            state["patient_smoker"] = extracted.smoker
+
+        smoker_hint = _detect_smoker_from_text(last_msg)
+        if smoker_hint is not None:
+            state["patient_smoker"] = smoker_hint
 
     has_name = bool(state.get("patient_name"))
     has_age = state.get("patient_age") is not None
@@ -321,9 +347,11 @@ def _extract_patient_data(conversation: List[Dict[str, str]], symptoms_only: boo
 
     if symptoms_only:
         system_prompt = (
-            "Extract ONLY today's visit symptoms and duration from the latest user messages. "
-            "Return a single JSON object (not an array) with keys: symptoms (string), duration (string). "
-            "Use null if missing."
+            "Extract today's visit details from the latest user messages. "
+            "Return a single JSON object (not an array) with keys: "
+            "symptoms (string), duration (string), smoker (boolean or null). "
+            "Set smoker=true if they mention smoking recently, cigarettes, or tobacco. "
+            "Set smoker=false only if they clearly deny smoking. Use null if not mentioned."
         )
     else:
         system_prompt = (
@@ -421,6 +449,10 @@ def _extract_basic_info_fallback(conversation: List[Dict[str, str]]) -> Dict[str
             data["smoker"] = "yes" in next_words or "true" in next_words
     elif "non-smoker" in full_text or "non smoker" in full_text:
         data["smoker"] = False
+    else:
+        smoker_hint = _detect_smoker_from_text(full_text)
+        if smoker_hint is not None:
+            data["smoker"] = smoker_hint
 
     symptom_match = re.search(
         r'symptoms?\s*(?:is|:)?\s*([^\.]+?)(?:\s+for\s+|\s+medical|\s+occupation|$)',

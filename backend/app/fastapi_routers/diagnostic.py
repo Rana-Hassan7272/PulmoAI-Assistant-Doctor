@@ -223,7 +223,7 @@ async def chat_with_agent(
         # Use visit_id as thread_id for LangGraph checkpointing
         config = {
             "configurable": {"thread_id": visit_id},
-            "recursion_limit": 100  # Increase recursion limit for chat interactions (was 50, increased to handle complex workflows)
+            "recursion_limit": 20
         }
         
         # Get current state from LangGraph checkpointer
@@ -323,10 +323,19 @@ async def chat_with_agent(
             try:
                 # Use a single forward pass that returns both prediction + probabilities.
                 # (Also, run it in a thread so it can't block other requests.)
-                from ..ml_models.xray.preprocessor import predict_xray_all
-                
+                from ..ml_models.xray.preprocessor import predict_xray_all, reset_predictor, ensure_xray_model_loaded
+
+                if not ensure_xray_model_loaded():
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "X-ray model is not available on the server. "
+                            "The model weights may be missing from deployment. "
+                            "Please try again later or say 'skip xray'."
+                        ),
+                    )
+
                 try:
-                    # Fail fast instead of letting the whole request hang.
                     timeout_sec = float(os.getenv("XRAY_INFERENCE_TIMEOUT_SEC", "25"))
                     xray_all = await asyncio.wait_for(
                         asyncio.to_thread(predict_xray_all, xray_image_data),
@@ -340,10 +349,11 @@ async def chat_with_agent(
                         detail="X-ray analysis timed out. Please try again or upload a smaller/less compressed image.",
                     )
                 except Exception as model_error:
+                    reset_predictor()
                     print(f"Error in X-ray model prediction: {model_error}")
                     raise HTTPException(
                         status_code=500,
-                        detail="Failed to analyze X-ray image. The image may be corrupted or the model is unavailable. Please try uploading again."
+                        detail=f"Failed to analyze X-ray image: {model_error}"
                     )
                 
                 # Validate prediction results
@@ -370,7 +380,10 @@ async def chat_with_agent(
                         "confidence": float(prediction.get("confidence", 0.0))
                     },
                     "probabilities": {
-                        "no_disease": float(probabilities.get("No disease", 0.0)),
+                        "no_disease": float(
+                            probabilities.get("NORMAL")
+                            or probabilities.get("No disease", 0.0)
+                        ),
                         "bacterial_pneumonia": float(probabilities.get("Bacterial pneumonia", 0.0)),
                         "viral_pneumonia": float(probabilities.get("Viral pneumonia", 0.0))
                     }

@@ -17,6 +17,8 @@ from ..core.error_handling import (
 
 logger = logging.getLogger(__name__)
 
+_google_quota_cooldown_until = 0.0
+
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -94,12 +96,25 @@ def _messages_to_gemini(messages: List[Dict[str, str]]) -> Tuple[Optional[str], 
     return system_instruction, merged
 
 
+def _mark_google_quota_exhausted(retry_seconds: float = 60.0) -> None:
+    global _google_quota_cooldown_until
+    _google_quota_cooldown_until = time.time() + max(retry_seconds, 30.0)
+    logger.warning("Google Gemini quota cooldown active — using Groq for ~%ss", int(retry_seconds))
+
+
+def _google_in_quota_cooldown() -> bool:
+    return time.time() < _google_quota_cooldown_until
+
+
 def _call_google_gemini(
     messages: List[Dict[str, str]],
     temperature: float,
     json_mode: bool,
     timeout: int,
 ) -> str:
+    if _google_in_quota_cooldown():
+        raise LLMRateLimitError("Google Gemini quota cooldown — skipping to fallback")
+
     try:
         import google.generativeai as genai
     except ImportError:
@@ -165,7 +180,11 @@ def _call_openai_provider(messages: List[Dict[str, str]], temperature: float, js
 
 
 def _should_fallback_to_groq(provider: str, error: Exception) -> bool:
-    return provider != "groq" and bool(GROQ_API_KEY) and not isinstance(error, LLMRateLimitError)
+    if provider == "groq" or not GROQ_API_KEY:
+        return False
+    if isinstance(error, LLMRateLimitError):
+        return provider == "google"
+    return True
 
 
 def call_llm(
@@ -198,8 +217,16 @@ def call_llm(
             error_str = str(e).lower()
             log_error_with_context(e, {"provider": selected_provider, "attempt": attempt + 1})
 
+            if selected_provider == "google" and any(
+                x in error_str for x in ("rate limit", "429", "quota", "resourceexhausted")
+            ):
+                _mark_google_quota_exhausted()
+
             if _should_fallback_to_groq(selected_provider, e):
-                logger.warning(f"{selected_provider} failed, falling back to Groq: {e}")
+                if selected_provider == "google":
+                    logger.warning("Google Gemini unavailable, using Groq")
+                else:
+                    logger.warning(f"{selected_provider} failed, falling back to Groq: {e}")
                 return call_llm(
                     messages,
                     temperature=temp,
