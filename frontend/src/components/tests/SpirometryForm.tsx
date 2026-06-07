@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 interface SpirometryFormProps {
   onSubmit: (data: SpirometryData) => void
@@ -16,30 +16,31 @@ const SpirometryForm: React.FC<SpirometryFormProps> = ({ onSubmit, onCancel }) =
   const [fvc, setFvc] = useState('')
   const [fev1Fvc, setFev1Fvc] = useState('')
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    const fev1Val = parseFloat(fev1)
-    const fvcVal = parseFloat(fvc)
-    const fev1FvcVal = parseFloat(fev1Fvc)
-
-    if (isNaN(fev1Val) || isNaN(fvcVal) || isNaN(fev1FvcVal)) {
-      return
-    }
-
-    onSubmit({
-      fev1: fev1Val,
-      fvc: fvcVal,
-      fev1_fvc: fev1FvcVal,
-    })
-  }
-
-  const calculateRatio = () => {
+  useEffect(() => {
     const fev1Val = parseFloat(fev1)
     const fvcVal = parseFloat(fvc)
     if (!isNaN(fev1Val) && !isNaN(fvcVal) && fvcVal > 0) {
       const ratio = (fev1Val / fvcVal) * 100
       setFev1Fvc(ratio.toFixed(2))
+    } else {
+      setFev1Fvc('')
     }
+  }, [fev1, fvc])
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const fev1Val = parseFloat(fev1)
+    const fvcVal = parseFloat(fvc)
+    if (isNaN(fev1Val) || isNaN(fvcVal) || fvcVal <= 0) {
+      return
+    }
+    const ratio = (fev1Val / fvcVal) * 100
+
+    onSubmit({
+      fev1: fev1Val,
+      fvc: fvcVal,
+      fev1_fvc: Math.round(ratio * 100) / 100,
+    })
   }
 
   return (
@@ -52,13 +53,11 @@ const SpirometryForm: React.FC<SpirometryFormProps> = ({ onSubmit, onCancel }) =
           <input
             type="number"
             step="0.1"
+            min="0"
             value={fev1}
-            onChange={(e) => {
-              setFev1(e.target.value)
-              calculateRatio()
-            }}
+            onChange={(e) => setFev1(e.target.value)}
             className="input-field"
-            placeholder="e.g., 2.1"
+            placeholder="e.g., 2.5"
             required
           />
         </div>
@@ -69,13 +68,11 @@ const SpirometryForm: React.FC<SpirometryFormProps> = ({ onSubmit, onCancel }) =
           <input
             type="number"
             step="0.1"
+            min="0"
             value={fvc}
-            onChange={(e) => {
-              setFvc(e.target.value)
-              calculateRatio()
-            }}
+            onChange={(e) => setFvc(e.target.value)}
             className="input-field"
-            placeholder="e.g., 2.8"
+            placeholder="e.g., 4.2"
             required
           />
         </div>
@@ -85,15 +82,15 @@ const SpirometryForm: React.FC<SpirometryFormProps> = ({ onSubmit, onCancel }) =
           </label>
           <input
             type="number"
-            step="0.1"
+            step="0.01"
             value={fev1Fvc}
-            onChange={(e) => setFev1Fvc(e.target.value)}
-            className="input-field"
-            placeholder="e.g., 75.0"
+            readOnly
+            className="input-field bg-gray-50"
+            placeholder="Auto-calculated"
             required
           />
           <p className="text-xs text-gray-500 mt-1">
-            This will be calculated automatically if you enter FEV1 and FVC
+            Calculated as (FEV1 ÷ FVC) × 100 — e.g. 2.5 ÷ 4.2 = 59.52%
           </p>
         </div>
         <div className="flex space-x-3">
@@ -112,4 +109,3 @@ const SpirometryForm: React.FC<SpirometryFormProps> = ({ onSubmit, onCancel }) =
 }
 
 export default SpirometryForm
-

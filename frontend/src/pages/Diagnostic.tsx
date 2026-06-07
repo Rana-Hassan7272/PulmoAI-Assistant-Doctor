@@ -382,7 +382,8 @@ const Diagnostic = () => {
 
   const handleSpirometrySubmit = async (data: SpirometryData) => {
     setShowSpirometryForm(false)
-    const message = `Spirometry test results submitted: FEV1=${data.fev1}L, FVC=${data.fvc}L, FEV1/FVC=${data.fev1_fvc}%`
+    const ratio = data.fvc > 0 ? ((data.fev1 / data.fvc) * 100).toFixed(2) : data.fev1_fvc.toFixed(2)
+    const message = `Spirometry test results submitted: FEV1=${data.fev1}L, FVC=${data.fvc}L, FEV1/FVC=${ratio}%`
     handleSend(message)
   }
 
