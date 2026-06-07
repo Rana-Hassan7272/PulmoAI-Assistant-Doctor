@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Dict, Any, Optional, List
 from .state import AgentState
-from .config import call_groq_llm
+from .intent_router import parse_test_actions
 from ..ml_models.spirometry.featurizer import predict_spirometry, predict_spirometry_proba
 from ..ml_models.bloodcount_report.feature import predict_blood_disease
 
@@ -24,74 +24,6 @@ def _pending_tests(state: AgentState, recommended: List[str]) -> List[str]:
         elif test == "cbc" and not state.get("cbc_available") and "cbc" not in missing:
             pending.append("cbc")
     return pending
-
-
-def _parse_test_actions_llm(state: AgentState, user_message: str, pending: List[str]) -> List[Dict[str, str]]:
-    if not pending:
-        return []
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You interpret patient messages during diagnostic test collection. "
-                f"Pending tests: {', '.join(pending)}. "
-                "Return JSON only: {\"actions\": [{\"type\": \"skip|show_form|prompt_upload\", \"test\": \"xray|cbc|spirometry\"}]}. "
-                "Examples: "
-                "'skip xray give spirometry form' -> skip xray + show_form spirometry. "
-                "'give xray' or 'xray form' -> prompt_upload xray (X-ray uses image upload, not a form). "
-                "'skip' alone -> skip the first pending test. "
-                "'give cbc form' -> show_form cbc. "
-                "Only use tests from the pending list."
-            ),
-        },
-        {"role": "user", "content": user_message},
-    ]
-
-    try:
-        raw = call_groq_llm(messages, temperature=0.0, json_mode=True)
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-            clean = clean.split("```")[0].strip()
-        data = json.loads(clean)
-        actions = data.get("actions", [])
-        valid = []
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            atype = str(action.get("type", "")).lower()
-            test = str(action.get("test", "")).lower().replace("x-ray", "xray")
-            if atype in ("skip", "show_form", "prompt_upload") and test in ("xray", "cbc", "spirometry"):
-                if test in pending or atype == "skip":
-                    valid.append({"type": atype, "test": test})
-        return valid
-    except Exception as e:
-        logger.warning(f"LLM test intent parse failed: {e}")
-        return _parse_test_actions_fallback(user_message, pending)
-
-
-def _parse_test_actions_fallback(message: str, pending: List[str]) -> List[Dict[str, str]]:
-    msg = message.lower().replace("spiromtery", "spirometry").replace("x-ray", "xray")
-    actions: List[Dict[str, str]] = []
-
-    for test in ("xray", "cbc", "spirometry"):
-        if test not in msg:
-            continue
-        if "skip" in msg and test in pending:
-            actions.append({"type": "skip", "test": test})
-        elif test == "xray" and test in pending:
-            actions.append({"type": "prompt_upload", "test": "xray"})
-        elif "form" in msg or "give" in msg or msg.strip() == test:
-            if test in pending:
-                actions.append({"type": "show_form" if test != "xray" else "prompt_upload", "test": test})
-
-    if "skip" in msg and not any(a["type"] == "skip" for a in actions) and pending:
-        actions.insert(0, {"type": "skip", "test": pending[0]})
-
-    return actions
 
 
 def _apply_skip(state: AgentState, test: str) -> None:
@@ -158,10 +90,25 @@ def test_collector_agent(state: AgentState) -> AgentState:
         just_collected = "CBC"
 
     pending = _pending_tests(state, recommended)
-    if not pending:
-        return _structure_final_output(state)
 
-    actions = _parse_test_actions_llm(state, last_message, pending)
+    if just_collected and pending:
+        state["test_collection_complete"] = False
+        remaining = ", ".join(t.upper() for t in pending)
+        state["message"] = (
+            f"Thank you for providing the **{just_collected}** result.\n\n"
+            f"**Still needed:** {remaining}\n\n"
+            + _message_for_next_test(state, pending[0])
+        )
+        return state
+
+    if not pending:
+        return _structure_final_output(state, ack=f"Thank you for providing the {just_collected}." if just_collected else "")
+
+    pre_actions = state.pop("pending_test_actions", None)
+    if pre_actions:
+        actions = pre_actions
+    else:
+        actions = parse_test_actions(last_message, pending)
 
     for action in actions:
         atype = action["type"]

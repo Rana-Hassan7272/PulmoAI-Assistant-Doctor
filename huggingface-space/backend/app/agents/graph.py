@@ -71,7 +71,11 @@ def create_diagnostic_graph():
     workflow.add_edge("doctor_note_generator", END)
     workflow.add_conditional_edges("test_collector", check_test_collection_complete, {"complete": "supervisor", "awaiting_tests": END})
     workflow.add_conditional_edges("rag_specialist", check_treatment_approval, {"awaiting_approval": END, "approved": "supervisor"})
-    workflow.add_conditional_edges("treatment_approval", check_treatment_approval, {"awaiting_approval": END, "approved": "supervisor"})
+    workflow.add_conditional_edges("treatment_approval", check_treatment_approval, {
+        "awaiting_approval": END,
+        "approved": "supervisor",
+        "more_tests": "supervisor",
+    })
     
     workflow.add_edge("report_generator", "history_saver")
     workflow.add_edge("history_saver", "followup_agent")
@@ -95,11 +99,11 @@ def _recover_doctor_note_from_conversation(conversation: list) -> str:
 
 
 def doctor_note_generator_agent(state: AgentState) -> AgentState:
-    from .tools import recommend_tests
+    from .intent_router import recommend_tests_llm
 
     if state.get("doctor_note"):
         if not state.get("tests_recommended"):
-            state["tests_recommended"] = recommend_tests(state.get("symptoms", ""))
+            state["tests_recommended"] = recommend_tests_llm(state)
         return state
 
     recovered_note = _recover_doctor_note_from_conversation(state.get("conversation_history", []))
@@ -108,7 +112,7 @@ def doctor_note_generator_agent(state: AgentState) -> AgentState:
         if not state.get("tests_recommended"):
             from .patient_intake import _recover_tests_from_conversation
             recovered_tests = _recover_tests_from_conversation(state.get("conversation_history", []))
-            state["tests_recommended"] = recovered_tests or recommend_tests(state.get("symptoms", ""))
+            state["tests_recommended"] = recovered_tests or recommend_tests_llm(state)
         return state
 
     test_results_text = format_test_results_for_llm(state)
@@ -123,7 +127,7 @@ def doctor_note_generator_agent(state: AgentState) -> AgentState:
     note = call_groq_llm([{"role": "user", "content": prompt}], temperature=0.2)
     state["doctor_note"] = note
 
-    state["tests_recommended"] = recommend_tests(state.get("symptoms", ""))
+    state["tests_recommended"] = recommend_tests_llm(state)
     rec_text = ", ".join([t.upper() for t in state["tests_recommended"]])
     state["message"] = (
         f"**Clinical Assessment:**\n{note}\n\n"
@@ -167,17 +171,39 @@ def rag_specialist_agent(state: AgentState) -> AgentState:
 
 
 def treatment_approval_agent(state: AgentState) -> AgentState:
-    # Use conversation history to check for approval
+    from .intent_router import parse_approval_intent
+
     history = state.get("conversation_history", [])
-    if not history: return state
-    
-    last_msg = history[-1]["content"].lower()
-    if any(word in last_msg for word in ["yes", "approve", "ok", "okay", "fine", "proceed", "good", "sure"]):
+    if not history:
+        return state
+
+    result = parse_approval_intent(state)
+    intent = result.get("intent", "unclear")
+
+    if intent == "approve":
         state["treatment_approved"] = True
         state["message"] = "Processing your approval and generating the final report..."
+    elif intent == "more_tests":
+        state["redirect_to_test_collector"] = True
+        state["test_collection_complete"] = False
+        state["treatment_plan"] = None
+        state["diagnosis"] = None
+        state["message"] = (
+            "Understood — let's continue with your tests. "
+            "You can upload an **X-ray**, open the **CBC** or **Spirometry** form, or **skip** any test."
+        )
+    elif intent == "reject":
+        state["message"] = "What would you like to change in the treatment plan? Describe your concerns."
+    elif intent == "question":
+        state["message"] = (
+            "That's a good question. Please share any concerns about the plan, "
+            "or say **approve** to proceed, or tell me if you need more tests (X-ray, CBC, Spirometry)."
+        )
     else:
-        # If user asks a question, let RAG handle it (supervisor will route back if needed)
-        state["message"] = "I need your approval to proceed with the treatment plan. Do you accept it?"
+        state["message"] = (
+            "Please **approve** the treatment plan, ask a question, request more tests, "
+            "or tell me what you'd like to change."
+        )
     return state
 
 
@@ -240,6 +266,9 @@ def check_emergency(state):
     return "emergency" if state.get("emergency_flag") else "continue"
 
 def check_treatment_approval(state):
+    if state.get("redirect_to_test_collector"):
+        state["redirect_to_test_collector"] = False
+        return "more_tests"
     return "approved" if state.get("treatment_approved") else "awaiting_approval"
 
 def check_test_collection_complete(state):

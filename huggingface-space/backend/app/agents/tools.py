@@ -785,9 +785,7 @@ def merge_client_state_snapshot(state: AgentState, snapshot: Optional[Dict[str, 
         "patient_data_confirmed", "doctor_note", "tests_recommended", "symptoms",
         "symptom_duration", "patient_name", "patient_age", "patient_gender",
         "patient_smoker", "patient_weight", "emergency_checked", "emergency_flag",
-        "xray_available", "spirometry_available", "cbc_available", "missing_tests",
-        "test_collection_complete", "treatment_plan", "treatment_approved",
-        "current_step", "diagnosis", "final_report",
+        "missing_tests", "current_step",
     )
     for key in merge_keys:
         client_val = snapshot.get(key)

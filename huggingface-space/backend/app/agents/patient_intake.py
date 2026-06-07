@@ -252,7 +252,11 @@ def patient_intake_agent(state: AgentState) -> AgentState:
         logger.info("Patient data confirmed and saved to profile")
         return state
 
-    if any(word in last_msg_lower for word in ["no", "wrong", "change", "incorrect", "not correct"]):
+    if awaiting_confirm and (
+        re.search(r"\b(no|wrong|incorrect)\b", last_msg_lower)
+        or "not correct" in last_msg_lower
+        or re.search(r"\bchange\b", last_msg_lower)
+    ):
         state["message"] = "I'm sorry. Please tell me what information is incorrect."
         state["current_step"] = "patient_intake_waiting_input"
         return state
